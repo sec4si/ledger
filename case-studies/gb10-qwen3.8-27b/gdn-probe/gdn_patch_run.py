@@ -1,5 +1,6 @@
-"""先把 vLLM 的 GDN MTP 解码算子换成扩展版（KEI_GDN_MODE=0 原样 / 1 只写最后一个位置），再运行
-Ledger 的 vllm_decode.py。用法：python gdn_patch_run.py <vllm_decode.py> [它的参数...]"""
+"""Swap vLLM's GDN MTP decode op for the extension build (KEI_GDN_MODE: 0 per-token stores, 1 last
+position only, 2 deferred), then run Ledger's vllm_decode.py.
+Usage: python gdn_patch_run.py <vllm_decode.py> [args...]"""
 
 import atexit
 import os
