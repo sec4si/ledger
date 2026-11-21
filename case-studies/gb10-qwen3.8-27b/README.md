@@ -152,7 +152,32 @@ The replay costs about 4 us per GDN launch at batch 1 over the store-last-only p
 baseline run fell back to eager execution and is excluded; its tokens also differ from the graph
 runs, as eager and graph execution do in vLLM regardless of this change.
 
-## 7. vLLM 0.34.0
+## 7. Upstream
+
+Reported as [vllm-project/vllm#69152](https://github.com/vllm-project/vllm/issues/69152) and fixed in
+[vllm-project/vllm#69160](https://github.com/vllm-project/vllm/pull/69160), which ports the
+deferred stores to vLLM main on top of #61434. On main the CUDA kernel writes its records in the
+Triton kernel's layout (one record per 16-row V block), so a request can move between the fused
+CUDA op and the Triton spec path from one step to the next. That costs some speed against the
+prototype: the GDN kernel takes 116 us at batch 4 instead of 97 us.
+
+Same machine and model, vLLM main built for sm_121:
+
+| | per-token stores | deferred |
+|---|---|---|
+| decode step, batch 1 (GPU busy) | 120.00 / 119.85 ms | 117.95 / 117.90 ms (-1.7%) |
+| decode step, batch 4 (GPU busy) | 132.22 / 132.94 ms | 125.35 / 125.74 ms (-5.3%) |
+| `vllm bench serve`, concurrency 1 | 27.14 tok/s | 27.50 tok/s (+1.3%) |
+| `vllm bench serve`, concurrency 4 | 94.48 tok/s | 99.42 tok/s (+5.2%) |
+| `vllm bench serve`, concurrency 8 | 164.18 tok/s | 176.56 tok/s (+7.5%) |
+| GSM8K, 200 questions, greedy | 0.975 | 0.975 |
+
+Greedy tokens are identical between the two arms in every decode-step run. Kernel tests: 162
+passed, including eight new ones (bit-identical outputs and slot-0 state against per-token
+stores, and the CUDA and Triton paths handing a request to each other). Commands and raw output
+are in the PR.
+
+## 8. vLLM 0.34.0
 
 | | 0.31.0 | 0.34.0 |
 |---|---|---|

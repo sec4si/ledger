@@ -26,8 +26,11 @@ before: with three draft tokens it writes a full 3.15 MB recurrent state for eac
 positions, 12.6 MB per layer, and those dirty lines are flushed from L2 while the projection
 streams its weight. Only the state at the accepted position is ever read again.
 
-A name-level profile shows "this GEMM is slow". Ledger shows whose bill it is. The full case
-study, with the measurements and the scripts to reproduce them, is in
+A name-level profile shows "this GEMM is slow". Ledger shows whose bill it is. Deferring the
+stores to the next step is bit-identical and raises serving throughput by 5.2% / 7.5% at
+concurrency 4 / 8 on that machine; it is upstream as
+[vllm-project/vllm#69160](https://github.com/vllm-project/vllm/pull/69160). The full case study,
+with the measurements and the scripts to reproduce them, is in
 [`case-studies/gb10-qwen3.8-27b`](case-studies/gb10-qwen3.8-27b).
 
 ## Use
