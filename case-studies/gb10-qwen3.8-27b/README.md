@@ -103,11 +103,39 @@ times drift by as much as the effect (the GB10 sits at its software power cap; s
 column), so the per-kernel books are the measurement. BF16 state is a probe, not a fix: it
 changes numerics.
 
-The fix belongs in the GDN kernel: keep one state per step plus the few kilobytes of per-token
-inputs, and replay the accepted tokens at the start of the next step. Expected saving about
-2 to 2.5 ms per step here, more at larger batch. `vllm-issue-draft.md` has the write-up.
+## 5. Removing the stores
 
-## 5. vLLM 0.34.0
+To measure what the fix would buy, the vLLM 0.31.0 kernel source was built as a standalone
+extension (bitwise identical to the shipped kernel when compiled with `--use_fast_math`) with a
+switch that keeps only the last position's store, and swapped into the engine before graph
+capture. That writes exactly as much state as a real fix would. It is a performance probe only:
+after a rejected draft the state is wrong.
+
+Alternating runs at a locked 2000 MHz clock, 40 steps each, GPU busy time per step:
+
+| batch | all positions stored | last position only | saving |
+|---|---|---|---|
+| 1 | 120.9 / 121.0 ms | 119.7 ms | 1.2 to 1.4 ms (1%) |
+| 4 | 131.6 / 131.9 ms | 122.5 / 123.0 ms | **9.0 ms (6.8%)**, both pairs |
+
+| kernel, median | batch 1 all | batch 1 last | batch 4 all | batch 4 last |
+|---|---|---|---|---|
+| GDN decode | 40.9 us | 23.3 us | 267.6 us | 83.7 us |
+| GDN out_proj | 194.7 us | 162.7 us | 199.8 us | 192.5 us |
+| o_proj (control) | 149.0 us | 149.3 us | 150.2 us | 150.1 us |
+
+At batch 1 the stores fit in L2 and the cost lands on the next GEMM; at batch 4 they are 50 MB
+per layer, twice the L2, and the GDN kernel itself stalls on DRAM writes. The state traffic grows
+with the batch while weight traffic does not, so the saving grows with load. (At batch 1 the
+kernel-level saving is 2.4 ms per step but the step only gained 1.2 to 1.4 ms: in that run the
+MLP gate_up GEMMs were 4% slower in every layer, GDN or not, consistent with power-cap drift. A
+fourth batch-1 run fell back to eager execution after the corrupted state and is excluded.)
+
+The fix belongs in the GDN kernel: keep one state per step plus the few kilobytes of per-token
+inputs, and replay the accepted tokens at the start of the next step. `vllm-issue-draft.md` has
+the write-up.
+
+## 6. vLLM 0.34.0
 
 | | 0.31.0 | 0.34.0 |
 |---|---|---|

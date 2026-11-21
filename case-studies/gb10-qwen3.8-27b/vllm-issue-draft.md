@@ -29,8 +29,15 @@ batch 1, CUDA graphs.
    22 us and `out_proj` from 191 us to 175 us, consistently across alternating runs at a locked
    clock. (Not proposed as a fix; it changes numerics.)
 
-Per step, the per-position states cost roughly 48 x 46 us = 2.2 ms of the 118 ms step on this
-machine.
+5. A build of the same kernel source (bitwise identical to the shipped op with `--use_fast_math`)
+   with a switch that keeps only the last position's store, swapped in before graph capture,
+   alternating with the unmodified kernel at a locked clock:
+   - batch 1: GDN kernel 41 -> 23 us, out_proj 195 -> 163 us, step 121 -> 119.7 ms;
+   - batch 4: GDN kernel 268 -> 84 us, step 131.7 -> 122.7 ms (**-6.8%**), reproduced in two pairs.
+   This writes as much state as a real fix would; it is a probe, outputs are wrong after a rejection.
+
+At batch 4 the per-position states are 50 MB per layer, more than twice the 24 MB L2, and the GDN
+kernel itself becomes write-bound. The cost grows with batch size while weight traffic does not.
 
 ## Possible fix
 
@@ -39,8 +46,8 @@ gates, beta: a few KB per head), and let the next step replay the accepted token
 starting state before processing its own tokens. Only one full state is written per step. The
 arithmetic is the same sequence of rank-1 updates, so outputs can stay bitwise identical.
 
-Expected saving on this setup: about three quarters of the state writes, roughly 2 to 2.5 ms per
-step. Larger batches multiply the state traffic.
+Expected saving on this setup: what the probe measured, about 1% of the step at batch 1 and 7% at
+batch 4, minus the small cost of replaying accepted tokens.
 
 ## How this was found
 

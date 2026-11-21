@@ -54,3 +54,16 @@ float:  Copy 245514  Mul 247194  Add 248109  Triad 248340  Dot 246542
 | GPU busy per step | 116.9 ms | 115.1 ms |
 | launches per step | 974 | 957 |
 | distinct kernels | 68 | 62 |
+
+## Last-position-only probe (extension build of the v0.31.0 GDN kernel, clock locked at 2000 MHz)
+
+| run | batch | GPU busy/step | GDN decode | out_proj | o_proj | gate_up | lm_head |
+|---|---|---|---|---|---|---|---|
+| all r1 | 1 | 120.86 ms | 40.9 us | 194.7 us | 149.0 us | 432.6 us | 5514 us |
+| last r1 | 1 | 119.67 ms | 23.3 us | 162.7 us | 149.3 us | 449.4 us | 5517 us |
+| all r2 | 1 | 121.02 ms | 40.6 us | 194.4 us | 149.7 us | 433.2 us | 5492 us |
+| last r2 | 1 | excluded: fell back to eager after the corrupted state | | | | | |
+| all r1 | 4 | 131.56 ms | 267.6 us | 199.5 us | 149.9 us | 439.5 us | 5501 us |
+| last r1 | 4 | 122.53 ms | 83.8 us | 192.1 us | 149.5 us | 438.5 us | 5494 us |
+| all r2 | 4 | 131.93 ms | 267.6 us | 200.1 us | 150.4 us | 441.3 us | 5514 us |
+| last r2 | 4 | 122.95 ms | 83.5 us | 192.8 us | 150.7 us | 439.7 us | 5562 us |
