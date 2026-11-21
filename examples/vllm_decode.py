@@ -52,13 +52,19 @@ def main():
     eng = llm.llm_engine
     for i in range(opts.batch):
         eng.add_request(f"ledger-{i}", PROMPT * (i + 1), params)
+    tokens = {}
+
+    def step():
+        for out in eng.step():
+            tokens[out.request_id] = list(out.outputs[0].token_ids)
+
     for _ in range(opts.warmup):
-        eng.step()
+        step()
     torch.cuda.synchronize()
     torch.cuda.profiler.start()
     t0 = time.perf_counter()
     for _ in range(opts.steps):
-        eng.step()
+        step()
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
     torch.cuda.profiler.stop()
@@ -66,7 +72,12 @@ def main():
     with open(os.path.join(out_dir, "run.json"), "w") as f:
         f.write(f'{{"steps": {opts.steps}, "batch": {opts.batch}, "ms_per_step": {elapsed / opts.steps * 1e3:.3f}}}')
     while eng.has_unfinished_requests():
-        eng.step()
+        step()
+    # Greedy outputs, so two runs that should compute the same thing can be compared token for token.
+    import json
+
+    with open(os.path.join(out_dir, "tokens.json"), "w") as f:
+        json.dump(tokens, f)
 
 
 if __name__ == "__main__":

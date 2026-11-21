@@ -1,6 +1,6 @@
-"""Compare the extension build of the GDN MTP decode kernel with the op shipped in vLLM 0.31.0.
-Mode 0 must match outputs and every state slot bit for bit; mode 1 must match outputs and store only
-the last position's slot. Shapes follow Qwen3.8-27B: H=16, HV=48, 4 tokens (1 + 3 drafts)."""
+"""对拍：扩展版 GDN MTP 解码核 与 vLLM 0.31.0 自带的 torch.ops._C 版。
+模式 0 输出与全部状态槽应逐位相同；模式 1 输出相同、只有最后一个位置的槽被写。
+形状取 Qwen3.8-27B：H=16，HV=48，4 个 token（1 + 3 草稿）。"""
 
 import os
 import sys
@@ -8,7 +8,7 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vllm._custom_ops  # noqa: F401,E402  loads torch.ops._C
+import vllm._custom_ops  # noqa: F401,E402  加载 torch.ops._C
 
 from kei_gdn_build import build  # noqa: E402
 
@@ -49,9 +49,9 @@ def main():
     for seed, accepted in [(1, 1), (2, 2), (3, 4)]:
         x = inputs(seed, accepted)
         ref_out, ref_state = run(torch.ops._C.fused_gdn_decode_post_conv_mtp, x)
-        kei.set_write_last_only(0)
+        kei.set_store_mode(0)
         out0, state0 = run(kei.fused_gdn_decode_post_conv_mtp, x)
-        kei.set_write_last_only(1)
+        kei.set_store_mode(1)
         out1, state1 = run(kei.fused_gdn_decode_post_conv_mtp, x)
         m0 = torch.equal(out0, ref_out) and torch.equal(state0, ref_state)
         m1_out = torch.equal(out1, ref_out)

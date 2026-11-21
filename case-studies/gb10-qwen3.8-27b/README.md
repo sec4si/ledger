@@ -131,11 +131,28 @@ kernel-level saving is 2.4 ms per step but the step only gained 1.2 to 1.4 ms: i
 MLP gate_up GEMMs were 4% slower in every layer, GDN or not, consistent with power-cap drift. A
 fourth batch-1 run fell back to eager execution after the corrupted state and is excluded.)
 
-The fix belongs in the GDN kernel: keep one state per step plus the few kilobytes of per-token
-inputs, and replay the accepted tokens at the start of the next step. `vllm-issue-draft.md` has
-the write-up.
+## 6. Deferring the stores
 
-## 6. vLLM 0.34.0
+The Triton GDN kernels already have a fix in review upstream (vLLM PR #61434, #64325): store the
+state after the first token in slot 0, record the inputs of the later tokens in slot 1, and replay
+the accepted ones at the start of the next step. `gdn-probe` implements the same layout in the
+fused CUDA kernel (store mode 2). The replay runs the same per-token update, so it is
+bit-identical to the shipped kernel: every output and the slot-0 state match over ten steps of
+random token and accepted counts (`test_defer.py`), and greedy decoding produces the same 448
+tokens per request in every run below.
+
+Alternating runs at 2000 MHz, GPU busy time per step:
+
+| batch | per-token stores | deferred | saving | GDN kernel |
+|---|---|---|---|---|
+| 1 | 120.90 / 121.04 ms | 118.71 / 119.10 ms | 2.1 ms (1.8%) | 40.7 -> 27.4 us |
+| 4 | 132.27 ms | 123.50 / 123.72 ms | 8.7 ms (6.5%) | 270 -> 97 us |
+
+The replay costs about 4 us per GDN launch at batch 1 over the store-last-only probe. One batch-4
+baseline run fell back to eager execution and is excluded; its tokens also differ from the graph
+runs, as eager and graph execution do in vLLM regardless of this change.
+
+## 7. vLLM 0.34.0
 
 | | 0.31.0 | 0.34.0 |
 |---|---|---|

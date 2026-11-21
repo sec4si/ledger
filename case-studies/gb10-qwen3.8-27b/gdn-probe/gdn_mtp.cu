@@ -14,9 +14,15 @@
 #include <c10/cuda/CUDAGuard.h>
 
 // Copy of vLLM v0.31.0 csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu (Apache-2.0) built as a
-// standalone extension for an experiment: write_last_only=1 keeps only the last position's state
-// store, to measure the cost of the per-position stores. Outputs are wrong after a rejection.
-static int g_write_last_only = 0;
+// standalone extension. g_store_mode selects how a spec-decode step stores the recurrent state:
+//   0  per token (as shipped): the state after every token goes to its own slot;
+//   1  last token only: a probe for the cost of the per-token stores, wrong after a rejection;
+//   2  deferred (the scheme of vLLM PR #61434): the state after the first token goes to slot 0, the
+//      inputs of the later tokens are recorded in slot 1, and the next step replays the accepted
+//      ones before its own tokens with the same arithmetic, so outputs stay bit-identical.
+static int g_store_mode = 0;
+
+constexpr int kRecordFloats = 128 + 128 + 4;  // k, v, decay, beta of one token, padded to 16 bytes
 
 namespace {
 
@@ -164,7 +170,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const void* __restrict__ norm_weight, __nv_bfloat16* __restrict__ out,
     int H, int HV, int state_indices_width, int dt_bias_type,
     bool norm_weight_is_bf16, float scale, float norm_eps,
-    GdnDecodeStrides strides, int write_last_only) {
+    GdnDecodeStrides strides, int store_mode) {
   const int request = blockIdx.x;
   const int value_head = blockIdx.y;
   const int tid = threadIdx.x;
@@ -178,10 +184,14 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   }
 
   const int accepted = num_accepted_tokens[request];
+  const int* row_slots = state_indices + request * state_indices_width;
+  const bool defer = store_mode == 2 && state_indices_width > 1 && row_slots[1] > 0;
   const int source_slot =
       accepted > 0 && accepted <= state_indices_width
-          ? state_indices[request * state_indices_width + accepted - 1]
+          ? row_slots[defer ? 0 : accepted - 1]
           : 0;
+  // Deferred mode: replay the records of the previous step's accepted tokens after the first.
+  const int num_replay = defer ? accepted - 1 : 0;
   if (source_slot <= 0 || num_tokens > kMaxMtpTokens) {
     for (int linear = tid; linear < num_tokens * kDimV; linear += kThreads) {
       const int token = bos + linear / kDimV;
@@ -205,6 +215,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   StateT* source_state =
       state + static_cast<int64_t>(source_slot) * strides.state_slot +
       value_head * kDimV * kDimK;
+  // Records live in this value head's part of slot 1, which a per-token step would fill with a
+  // full state; kMaxMtpTokens records of kRecordFloats floats fit with room to spare.
+  float* records =
+      defer ? reinterpret_cast<float*>(state + static_cast<int64_t>(row_slots[1]) *
+                                                   strides.state_slot +
+                                       value_head * kDimV * kDimK)
+            : nullptr;
   copy_state_chunk<StateT, kChunkV, kDimK, 2>(&shared_state[0][0][0],
                                               source_state, 0, tid, kThreads);
 
@@ -280,6 +297,37 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       h[row][3] = state_value.w;
     }
 
+    // Same update as the token loop below, minus the output dot product, which does not touch h.
+    for (int r = 0; r < num_replay; ++r) {
+      const float* record = records + r * kRecordFloats;
+      const float4 k4 = *reinterpret_cast<const float4*>(record + k_base);
+      const float k_values[4] = {k4.x, k4.y, k4.z, k4.w};
+      const float decay = record[2 * 128];
+      const float beta = record[2 * 128 + 1];
+      float dot_hk[kRowsPerWarp] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+      for (int row = 0; row < kRowsPerWarp; ++row) {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          h[row][i] *= decay;
+          dot_hk[row] += h[row][i] * k_values[i];
+        }
+      }
+      const Sum2 dot_hk_01 = warp_reduce_sum_pair(dot_hk[0], dot_hk[1]);
+      const Sum2 dot_hk_23 = warp_reduce_sum_pair(dot_hk[2], dot_hk[3]);
+      const float reduced_hk[kRowsPerWarp] = {dot_hk_01.x, dot_hk_01.y,
+                                              dot_hk_23.x, dot_hk_23.y};
+#pragma unroll
+      for (int row = 0; row < kRowsPerWarp; ++row) {
+        const int value = chunk * kChunkV + rows[row];
+        const float delta = (record[128 + value] - reduced_hk[row]) * beta;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          h[row][i] += k_values[i] * delta;
+        }
+      }
+    }
+
     for (int t = 0; t < num_tokens; ++t) {
       const float4 q4 = *reinterpret_cast<const float4*>(&shared_q[t][k_base]);
       const float4 k4 = *reinterpret_cast<const float4*>(&shared_k[t][k_base]);
@@ -326,9 +374,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
             __float2bfloat16(dot_hq_23.y);
       }
 
-      const int destination_slot =
-          state_indices[request * state_indices_width + t];
-      if (destination_slot > 0 && (!write_last_only || t == num_tokens - 1)) {
+      const int destination_slot = defer ? (t == 0 ? row_slots[0] : 0) : row_slots[t];
+      if (destination_slot > 0 && (store_mode != 1 || t == num_tokens - 1)) {
         StateT* destination_state =
             state +
             static_cast<int64_t>(destination_slot) * strides.state_slot +
@@ -343,6 +390,25 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     }
   }
   __syncthreads();
+
+  // Record this step's later tokens for the next step. Every replay read above is done.
+  if (defer) {
+    for (int linear = tid; linear < (num_tokens - 1) * kRecordFloats; linear += kThreads) {
+      const int t = 1 + linear / kRecordFloats;
+      const int field = linear % kRecordFloats;
+      float value;
+      if (field < 128) {
+        value = shared_k[t][field];
+      } else if (field < 256) {
+        value = __bfloat162float(shared_v[t][field - 128]);
+      } else if (field < 258) {
+        value = field == 256 ? shared_decay[t] : shared_beta[t];
+      } else {
+        continue;  // padding
+      }
+      records[(t - 1) * kRecordFloats + field] = value;
+    }
+  }
 
   if (warp < num_tokens) {
     const int t = warp;
@@ -416,7 +482,7 @@ void launch_gdn_decode_post_conv_mtp(
           static_cast<int>(state_indices.size(1)), dt_bias_type,
           norm_weight.scalar_type() == ScalarType::BFloat16,
           static_cast<float>(scale), static_cast<float>(norm_eps), strides,
-          g_write_last_only);
+          g_store_mode);
   const cudaError_t error = cudaGetLastError();
   TORCH_CHECK(error == cudaSuccess,
                   "GDN decode MTP post-conv kernel launch failed: ",
@@ -602,7 +668,7 @@ void fused_gdn_decode_post_conv_mtp(
   }
 }
 
-void set_write_last_only(int64_t on) { g_write_last_only = static_cast<int>(on); }
+void set_store_mode(int64_t mode) { g_store_mode = static_cast<int>(mode); }
 
 TORCH_LIBRARY(kei_gdn, m) {
   m.def(
@@ -611,5 +677,5 @@ TORCH_LIBRARY(kei_gdn, m) {
       "Tensor(s!) state, Tensor output_gate, Tensor norm_weight, Tensor(o!) out, float scale, "
       "float norm_eps, str output_gate_activation) -> ()");
   m.impl("fused_gdn_decode_post_conv_mtp", torch::kCUDA, &fused_gdn_decode_post_conv_mtp);
-  m.def("set_write_last_only(int on) -> ()", &set_write_last_only);
+  m.def("set_store_mode(int mode) -> ()", &set_store_mode);
 }

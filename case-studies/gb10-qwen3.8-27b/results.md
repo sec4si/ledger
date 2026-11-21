@@ -67,3 +67,16 @@ float:  Copy 245514  Mul 247194  Add 248109  Triad 248340  Dot 246542
 | last r1 | 4 | 122.53 ms | 83.8 us | 192.1 us | 149.5 us | 438.5 us | 5494 us |
 | all r2 | 4 | 131.93 ms | 267.6 us | 200.1 us | 150.4 us | 441.3 us | 5514 us |
 | last r2 | 4 | 122.95 ms | 83.5 us | 192.8 us | 150.7 us | 439.7 us | 5562 us |
+
+## Deferred stores (store mode 2), clock locked at 2000 MHz, 40 steps
+
+| run | batch | GPU busy/step | GDN decode | out_proj | o_proj | gate_up | tokens vs first run |
+|---|---|---|---|---|---|---|---|
+| per-token r1 | 1 | 120.90 ms | 40.7 us | 193.5 us | 149.4 us | 433.0 us | (reference) |
+| deferred r1 | 1 | 118.71 ms | 27.4 us | 162.2 us | 148.6 us | 434.1 us | identical |
+| per-token r2 | 1 | 121.04 ms | 40.7 us | 195.2 us | 148.9 us | 433.1 us | identical |
+| deferred r2 | 1 | 119.10 ms | 27.4 us | 162.0 us | 148.8 us | 434.1 us | identical |
+| per-token r1 | 4 | excluded: eager fallback | | | | | differs (eager) |
+| per-token r2 | 4 | 132.27 ms | 270.8 us | 200.0 us | 149.2 us | 441.6 us | (reference) |
+| deferred r1 | 4 | 123.50 ms | 97.0 us | 193.2 us | 149.0 us | 438.3 us | identical |
+| deferred r2 | 4 | 123.72 ms | 97.5 us | 193.5 us | 150.0 us | 440.8 us | identical |
