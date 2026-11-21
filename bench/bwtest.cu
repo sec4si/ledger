@@ -1,4 +1,4 @@
-// 本机显存读带宽上限：每线程 16 字节向量读、求和防优化；另测 D2D 拷贝。
+// Device read-bandwidth ceiling: 16-byte vector loads per thread, XOR-reduced so nothing is optimized away; also a device-to-device copy.
 #include <cstdio>
 #include <cuda_runtime.h>
 
@@ -12,7 +12,7 @@ __global__ void read_kernel(const int4* __restrict__ p, size_t n, int* out) {
 }
 
 int main() {
-  const size_t bytes = 4ull << 30;  // 4 GiB，远大于 L2
+  const size_t bytes = 4ull << 30;  // 4 GiB, far larger than L2
   int4* buf; int* out; void* dst;
   cudaMalloc(&buf, bytes); cudaMalloc(&dst, bytes); cudaMalloc(&out, 4);
   cudaMemset(buf, 1, bytes);
