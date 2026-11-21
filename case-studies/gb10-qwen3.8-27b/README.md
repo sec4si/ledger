@@ -1,0 +1,132 @@
+# Case study: decode on DGX Spark, Qwen3.8-27B NVFP4 with MTP
+
+Where does a decode step go on a DGX Spark, and which of it can be bought back?
+
+## Setup
+
+| | |
+|---|---|
+| Machine | NVIDIA DGX Spark: GB10 (sm_121, 48 SMs, 24 MB L2), 121 GB unified LPDDR5x |
+| Engine | vLLM 0.31.0 (main measurements) and 0.34.0 (comparison), CUDA graphs, no async scheduling |
+| Model | Qwen3.8-27B, NVFP4 checkpoint (MLP NVFP4 in layers 0-55, FP8 elsewhere) |
+| Speculation | `qwen3_5_mtp`, 3 draft tokens: 4 tokens through the main model per step |
+| Load | batch 1, 40 steady-state steps |
+
+## 1. The ceiling
+
+`bench/bwtest.cu` and [BabelStream](https://github.com/UoB-HPC/BabelStream) agree:
+
+| | GB/s |
+|---|---|
+| read-only kernel (`bwtest`) | 253.5 |
+| BabelStream Dot (double) | 253.0 |
+| BabelStream Copy / Mul / Add / Triad | 250.4 / 252.0 / 248.8 / 248.3 |
+| `cudaMemcpy` device to device | 243.0 |
+| spec sheet | 273 |
+
+All percentages below use 252 GB/s.
+
+## 2. The step
+
+Ledger, batch 1 (`report-031.md` has the full output, `results.md` the raw numbers of every experiment below):
+
+| | per step |
+|---|---|
+| wall time | 120.9 ms |
+| GPU busy | 120.5 ms |
+| idle between kernels | 0.36 ms (0.3%) |
+| launches | 972 |
+| weight bytes streamed | 24.2 GB |
+| effective bandwidth | 201 GB/s, 80% of the ceiling |
+| floor at the ceiling | 96 ms |
+
+The step is bandwidth-bound end to end, and idle time between kernels is negligible: fusing
+kernels to remove launch gaps buys almost nothing on this machine. Batch 2 costs the same as
+batch 1 within noise, as expected when every step streams the full weight set.
+
+## 3. Where the bandwidth goes
+
+Most weight-streaming launches run at 85 to 96% of the ceiling. Two items stand out:
+
+- **`lm_head` is read four times per step.** The main model reads it once and each of the three
+  MTP draft steps reads the full 248k-vocabulary head again: 5.1 GB, about 18% of the step. (Ledger
+  attributes three of the four reads; one launch goes through a statically linked cudart whose
+  parameters it cannot see.)
+- **GDN `out_proj` runs at 64%**, far below its neighbours. Section 4.
+
+## 4. Same kernel, same shape, different speed
+
+Ledger groups launches by kernel, grid and weight shape. One group splits:
+
+| weight | launches/step | median |
+|---|---|---|
+| `linear_attn.out_proj` (Gated DeltaNet layers) | 48 | 194 us |
+| `self_attn.o_proj` (attention layers) | 16 | 148 us |
+
+Same CUTLASS FP8 kernel, same grid, weights of the same shape [6144, 5120], both 4 KB aligned.
+The last kernel touching caches before every slow launch is the GDN decode kernel; before every
+fast launch it is attention.
+
+`gemm_isolation.py` separates the weight from the surroundings:
+
+| experiment | GEMM time |
+|---|---|
+| out_proj layer 0, isolated, L2 flushed by a read | 147.5 us |
+| out_proj layer 1, isolated | 147.5 us |
+| o_proj layer 3, isolated | 147.5 us |
+| o_proj layer 7, isolated | 147.5 us |
+| o_proj after writing 2 MB | 158.7 us |
+| ... 4 MB | 169.0 us |
+| ... 8 MB | 187.4 us |
+| ... 12 MB | 197.6 us |
+| ... 24 MB (L2 size) | 213.2 us |
+
+The weights are not the cause; dirty lines left in L2 are. The GDN decode kernel in vLLM
+(`csrc/gdn/fused_gdn_decode_kernel.cu`) writes the full recurrent state after every token of
+the step into a separate slot, so speculative tokens can be rolled back:
+48 heads x 128 x 128 x fp32 = 3.15 MB per position, 12.6 MB per layer for four positions. The
+kernel finishes quickly because the stores land in L2; `out_proj` then pays for the write-back.
+The next step reads only the slot of the last accepted position.
+
+Halving the state size confirms the mechanism. Alternating runs at a locked 2000 MHz clock,
+fp32 state (A) against `--mamba-ssm-cache-dtype bfloat16` (B):
+
+| run | GDN decode kernel | GDN out_proj | lm_head (control) |
+|---|---|---|---|
+| A1 | 41.2 us | 192 us | 5422 us |
+| B1 | 21.6 us | 175 us | 5431 us |
+| A2 | 40.6 us | 190 us | 5505 us |
+| B2 | 21.7 us | 176 us | 5538 us |
+
+Both kernels move by the predicted amount in every pair, about 1.7 ms per step together. Whole-step
+times drift by as much as the effect (the GB10 sits at its software power cap; see the control
+column), so the per-kernel books are the measurement. BF16 state is a probe, not a fix: it
+changes numerics.
+
+The fix belongs in the GDN kernel: keep one state per step plus the few kilobytes of per-token
+inputs, and replay the accepted tokens at the start of the next step. Expected saving about
+2 to 2.5 ms per step here, more at larger batch. `vllm-issue-draft.md` has the write-up.
+
+## 5. vLLM 0.34.0
+
+| | 0.31.0 | 0.34.0 |
+|---|---|---|
+| step (median) | 118.4 ms | 116.7 ms |
+| launches per step | 974 | 957 |
+
+0.34.0 runs the small BF16 `in_proj_ba` GEMM on a parallel graph branch next to `in_proj_qkvz`
+and fuses several norm/quant pairs. The GDN out_proj split, the four `lm_head` reads and the
+BF16 draft weights are unchanged.
+
+## Reproduce
+
+```sh
+make -C ../../capture CUDA=/usr/local/cuda
+LD_PRELOAD=../../capture/libledger.so LEDGER_OUT=out python ../../examples/vllm_decode.py \
+  --steps 40 --batch 1 -- --model <Qwen3.8-27B-NVFP4> --trust-remote-code --dtype bfloat16 \
+  --max-model-len 131072 --max-num-seqs 4 --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.90 --no-async-scheduling \
+  --speculative-config '{"method": "qwen3_5_mtp", "model": "<same>", "num_speculative_tokens": 3}'
+python -m ledger.analyze out --ceiling-gbps 252
+python gemm_isolation.py <Qwen3.8-27B-NVFP4>/model.safetensors
+```
