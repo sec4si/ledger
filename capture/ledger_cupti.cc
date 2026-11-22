@@ -4,7 +4,8 @@
 // kernel launched directly inside the profiling range, the function name, launch geometry and
 // the raw bytes of each parameter. Inside the profiling range (cudaProfilerStart/Stop) it also
 // records kernel timings through the CUPTI activity API. The analysis step joins the two to tell
-// which memory each launch touched and how long it took.
+// which memory each launch touched and how long it took. Memory copies are kept the same way: the
+// addresses come from the copy API calls and the memcpy nodes of graphs, the timings from CUPTI.
 //
 // Programs that never call cudaProfilerStart/Stop (a replay runtime driving recorded graphs, for
 // example) can open the range by graph launch count instead: LEDGER_GRAPH_WINDOW=<skip>:<take>
@@ -16,6 +17,10 @@
 //   clones-<pid>.jsonl    node clones made at instantiation {"id","orig"}
 //   launches-<pid>.jsonl  direct launches in range {"corr","name","grid","block","smem","params"}
 //   kernels-<pid>.jsonl   kernel timings in range {"start","end","corr","node","graph","stream","name","grid"}
+//   copynodes-<pid>.jsonl graph memcpy nodes  {"id","dst","src","bytes"}
+//   copies-<pid>.jsonl    direct copies in range {"corr","dst","src","bytes"}
+//   memcpys-<pid>.jsonl   copy timings in range {"start","end","corr","rcorr","node","graph","stream","bytes",
+//                         "kind","src_kind","dst_kind"} (CUPTI copy and memory kinds)
 // "params" is a list of [offset, size, hex].
 
 #include <cuda.h>
@@ -25,6 +30,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -48,7 +54,9 @@ struct Out {
 };
 
 std::mutex g_mu;
-Out g_nodes{"nodes"}, g_clones{"clones"}, g_launches{"launches"}, g_kernels{"kernels"};
+Out g_nodes{"nodes"}, g_clones{"clones"}, g_launches{"launches"}, g_kernels{"kernels"},
+    g_copy_nodes{"copynodes"}, g_copies{"copies"}, g_memcpys{"memcpys"};
+Out* const g_outs[] = {&g_nodes, &g_clones, &g_launches, &g_kernels, &g_copy_nodes, &g_copies, &g_memcpys};
 std::atomic<bool> g_in_range{false};
 std::atomic<long> g_graph_launches{0};
 long g_window_skip = -1, g_window_take = 0;
@@ -173,6 +181,27 @@ void write_line(Out& out, const std::string& line) {
   fputc('\n', out.f);
 }
 
+std::string copy_json(uint64_t dst, uint64_t src, uint64_t bytes) {
+  return "\"dst\":" + std::to_string(dst) + ",\"src\":" + std::to_string(src) + ",\"bytes\":" + std::to_string(bytes);
+}
+
+// The address of the first byte a copy touches on one side: host pointer or device pointer
+// depending on the memory type, plus the x offset (row offsets are rare in engines and ignored).
+uint64_t copy_side(CUmemorytype type, const void* host, CUdeviceptr device, size_t x) {
+  return (type == CU_MEMORYTYPE_HOST ? reinterpret_cast<uint64_t>(host) : device) + x;
+}
+
+void record_copy_node(CUgraphNode node, uint64_t id) {
+  CUDA_MEMCPY3D p{};
+  if (cuGraphMemcpyNodeGetParams(node, &p) != CUDA_SUCCESS) return;
+  const uint64_t bytes = uint64_t{p.WidthInBytes} * (p.Height ? p.Height : 1) * (p.Depth ? p.Depth : 1);
+  write_line(g_copy_nodes, "{\"id\":" + std::to_string(id) + "," +
+                               copy_json(copy_side(p.dstMemoryType, p.dstHost, p.dstDevice, p.dstXInBytes),
+                                         copy_side(p.srcMemoryType, p.srcHost, p.srcDevice, p.srcXInBytes),
+                                         bytes) +
+                               "}");
+}
+
 void record_graph_nodes(CUgraph graph) {
   size_t n = 0;
   if (cuGraphGetNodes(graph, nullptr, &n) != CUDA_SUCCESS || n == 0) return;
@@ -180,13 +209,18 @@ void record_graph_nodes(CUgraph graph) {
   cuGraphGetNodes(graph, nodes, &n);
   for (size_t i = 0; i < n; ++i) {
     CUgraphNodeType type;
-    if (cuGraphNodeGetType(nodes[i], &type) != CUDA_SUCCESS || type != CU_GRAPH_NODE_TYPE_KERNEL) continue;
+    if (cuGraphNodeGetType(nodes[i], &type) != CUDA_SUCCESS) continue;
+    uint64_t id = 0;
+    cuptiGetGraphNodeId(nodes[i], &id);
+    if (type == CU_GRAPH_NODE_TYPE_MEMCPY) {
+      record_copy_node(nodes[i], id);
+      continue;
+    }
+    if (type != CU_GRAPH_NODE_TYPE_KERNEL) continue;
     CUDA_KERNEL_NODE_PARAMS p{};
     if (cuGraphKernelNodeGetParams(nodes[i], &p) != CUDA_SUCCESS) continue;
     CUfunction f = p.func;
     if (!f && p.kern) cuKernelGetFunction(&f, p.kern);
-    uint64_t id = 0;
-    cuptiGetGraphNodeId(nodes[i], &id);
     write_line(g_nodes, "{\"id\":" + std::to_string(id) + "," +
                             describe(f, p.gridDimX, p.gridDimY, p.gridDimZ, p.blockDimX, p.blockDimY,
                                      p.blockDimZ, p.sharedMemBytes, p.kernelParams, p.extra) +
@@ -205,7 +239,7 @@ void flusher() {
     {
       // A child that ends with _exit() never closes its files; put everything on disk now.
       std::lock_guard<std::mutex> out_lock(g_mu);
-      for (Out* o : {&g_nodes, &g_clones, &g_launches, &g_kernels})
+      for (Out* o : g_outs)
         if (o->f) fflush(o->f);
     }
     fprintf(stderr, "ledger: pid %d flushed (cupti %d)\n", getpid(), static_cast<int>(r));
@@ -217,9 +251,11 @@ void set_range(bool on, bool in_callback = true) {
   if (on == g_in_range.exchange(on)) return;
   if (on) {
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+    cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY);
     return;
   }
   cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+  cuptiActivityDisable(CUPTI_ACTIVITY_KIND_MEMCPY);
   if (!in_callback) {
     cuptiActivityFlushAll(1);
     return;
@@ -250,6 +286,37 @@ void on_direct_launch(const CUpti_CallbackData* cb, CUfunction f, unsigned gx, u
   std::string body = f ? describe(f, gx, gy, gz, bx, by, bz, smem, params, extra)
                        : describe(name, layout_by_name(name), gx, gy, gz, bx, by, bz, smem, params, extra);
   write_line(g_launches, "{\"corr\":" + std::to_string(cb->correlationId) + "," + body + "}");
+}
+
+// Every linear copy entry point, driver or runtime, sync or async, takes (dst, src, byte count) as
+// its first three parameters, so one view of the parameter block serves all of them.
+struct LinearCopyParams {
+  uint64_t dst, src;
+  size_t bytes;
+};
+
+const CUpti_CallbackId kDriverCopies[] = {
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpy,                CUPTI_DRIVER_TRACE_CBID_cuMemcpyAsync,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpy_ptds,           CUPTI_DRIVER_TRACE_CBID_cuMemcpyAsync_ptsz,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpyHtoD_v2,         CUPTI_DRIVER_TRACE_CBID_cuMemcpyHtoDAsync_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoH_v2,         CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoHAsync_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoD_v2,         CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoDAsync_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpyHtoD_v2_ptds,    CUPTI_DRIVER_TRACE_CBID_cuMemcpyHtoDAsync_v2_ptsz,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoH_v2_ptds,    CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoHAsync_v2_ptsz,
+    CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoD_v2_ptds,    CUPTI_DRIVER_TRACE_CBID_cuMemcpyDtoDAsync_v2_ptsz};
+const CUpti_CallbackId kRuntimeCopies[] = {
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_v3020,       CUPTI_RUNTIME_TRACE_CBID_cudaMemcpyAsync_v3020,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_ptds_v7000,  CUPTI_RUNTIME_TRACE_CBID_cudaMemcpyAsync_ptsz_v7000};
+
+template <size_t N>
+bool contains(const CUpti_CallbackId (&ids)[N], CUpti_CallbackId id) {
+  return std::find(ids, ids + N, id) != ids + N;
+}
+
+void on_copy(const CUpti_CallbackData* cb) {
+  if (cb->callbackSite != CUPTI_API_ENTER || !g_in_range.load()) return;
+  auto* a = static_cast<const LinearCopyParams*>(cb->functionParams);
+  write_line(g_copies, "{\"corr\":" + std::to_string(cb->correlationId) + "," + copy_json(a->dst, a->src, a->bytes) + "}");
 }
 
 void on_driver(const CUpti_CallbackData* cb, CUpti_CallbackId id) {
@@ -350,8 +417,13 @@ void on_resource(const CUpti_ResourceData* r, CUpti_CallbackId id) {
 }
 
 void CUPTIAPI callback(void*, CUpti_CallbackDomain domain, CUpti_CallbackId id, const void* data) {
-  if (domain == CUPTI_CB_DOMAIN_DRIVER_API) on_driver(static_cast<const CUpti_CallbackData*>(data), id);
-  if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) on_runtime(static_cast<const CUpti_CallbackData*>(data), id);
+  if (domain == CUPTI_CB_DOMAIN_DRIVER_API || domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
+    const auto* cb = static_cast<const CUpti_CallbackData*>(data);
+    const bool driver = domain == CUPTI_CB_DOMAIN_DRIVER_API;
+    if (driver ? contains(kDriverCopies, id) : contains(kRuntimeCopies, id)) return on_copy(cb);
+    if (driver) on_driver(cb, id);
+    else on_runtime(cb, id);
+  }
   if (domain == CUPTI_CB_DOMAIN_RESOURCE) on_resource(static_cast<const CUpti_ResourceData*>(data), id);
 }
 
@@ -361,10 +433,24 @@ void CUPTIAPI buffer_requested(uint8_t** buffer, size_t* size, size_t* max_recor
   *max_records = 0;
 }
 
+void write_memcpy(const CUpti_ActivityMemcpy6* m) {
+  write_line(g_memcpys, "{\"start\":" + std::to_string(m->start) + ",\"end\":" + std::to_string(m->end) +
+                            ",\"corr\":" + std::to_string(m->correlationId) +
+                            ",\"rcorr\":" + std::to_string(m->runtimeCorrelationId) +
+                            ",\"node\":" + std::to_string(m->graphNodeId) + ",\"graph\":" + std::to_string(m->graphId) +
+                            ",\"stream\":" + std::to_string(m->streamId) + ",\"bytes\":" + std::to_string(m->bytes) +
+                            ",\"kind\":" + std::to_string(m->copyKind) + ",\"src_kind\":" + std::to_string(m->srcKind) +
+                            ",\"dst_kind\":" + std::to_string(m->dstKind) + "}");
+}
+
 void CUPTIAPI buffer_completed(CUcontext, uint32_t, uint8_t* buffer, size_t, size_t valid) {
   CUpti_Activity* rec = nullptr;
   std::string line;
   while (cuptiActivityGetNextRecord(buffer, valid, &rec) == CUPTI_SUCCESS) {
+    if (rec->kind == CUPTI_ACTIVITY_KIND_MEMCPY) {
+      write_memcpy(reinterpret_cast<const CUpti_ActivityMemcpy6*>(rec));
+      continue;
+    }
     if (rec->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) continue;
     auto* k = reinterpret_cast<CUpti_ActivityKernel10*>(rec);
     line = "{\"start\":" + std::to_string(k->start) + ",\"end\":" + std::to_string(k->end) +
@@ -388,6 +474,7 @@ void ledger_start() {
       CUPTI_DRIVER_TRACE_CBID_cuProfilerStart,  CUPTI_DRIVER_TRACE_CBID_cuProfilerStop,
       CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch,    CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz};
   for (auto id : driver) cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_DRIVER_API, id);
+  for (auto id : kDriverCopies) cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_DRIVER_API, id);
   if (const char* w = getenv("LEDGER_GRAPH_WINDOW")) {
     if (sscanf(w, "%ld:%ld", &g_window_skip, &g_window_take) != 2 || g_window_skip < 0 || g_window_take <= 0)
       g_window_skip = -1;
@@ -397,6 +484,7 @@ void ledger_start() {
       CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060,   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060,
       CUPTI_RUNTIME_TRACE_CBID_cudaProfilerStart_v4000,      CUPTI_RUNTIME_TRACE_CBID_cudaProfilerStop_v4000};
   for (auto id : runtime) cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_RUNTIME_API, id);
+  for (auto id : kRuntimeCopies) cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_RUNTIME_API, id);
   cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_GRAPHEXEC_CREATED);
   cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_GRAPHNODE_CLONED);
 }
@@ -418,7 +506,7 @@ __attribute__((destructor)) void ledger_fini() {
             g_window_take);
   set_range(false, false);
   cuptiActivityFlushAll(1);
-  for (Out* o : {&g_nodes, &g_clones, &g_launches, &g_kernels})
+  for (Out* o : g_outs)
     if (o->f) fclose(o->f);
 }
 

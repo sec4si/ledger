@@ -1,6 +1,10 @@
-// Device read-bandwidth ceiling: 16-byte vector loads per thread, XOR-reduced so nothing is optimized away; also a device-to-device copy.
+// Device read-bandwidth ceiling: 16-byte vector loads per thread, XOR-reduced so nothing is optimized away; also a device-to-device copy
+// and the host<->device copy ceilings (pinned and pageable) that ledger.transfers compares copies with.
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cuda_runtime.h>
+#include <utility>
 
 __global__ void read_kernel(const int4* __restrict__ p, size_t n, int* out) {
   int acc = 0;
@@ -34,5 +38,22 @@ int main() {
     cudaEventSynchronize(b); float ms; cudaEventElapsedTime(&ms, a, b); if (r && ms < best) best = ms;
   }
   printf("d2d copy (read+write) %.1f GB/s\n", 2.0 * bytes / best / 1e6);
+
+  const size_t host_bytes = 1ull << 30;
+  void* pinned; cudaMallocHost(&pinned, host_bytes);
+  void* pageable = malloc(host_bytes);
+  memset(pageable, 1, host_bytes);  // fault the pages in before timing
+  for (auto [name, host] : {std::pair{"pinned", pinned}, std::pair{"pageable", pageable}}) {
+    for (auto kind : {cudaMemcpyHostToDevice, cudaMemcpyDeviceToHost}) {
+      best = 1e9;
+      for (int r = 0; r < 6; ++r) {
+        void* d = kind == cudaMemcpyHostToDevice ? (void*)buf : host;
+        const void* s = kind == cudaMemcpyHostToDevice ? host : (const void*)buf;
+        cudaEventRecord(a); cudaMemcpyAsync(d, s, host_bytes, kind); cudaEventRecord(b);
+        cudaEventSynchronize(b); float ms; cudaEventElapsedTime(&ms, a, b); if (r && ms < best) best = ms;
+      }
+      printf("%s %-8s %.1f GB/s\n", kind == cudaMemcpyHostToDevice ? "h2d" : "d2h", name, host_bytes / best / 1e6);
+    }
+  }
   return 0;
 }

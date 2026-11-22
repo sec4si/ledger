@@ -81,6 +81,16 @@ Analyze:
 python -m ledger.analyze out --ceiling-gbps <measured> --out report.md
 ```
 
+Memory copies in the window are kept the same way. Engines that hold part of the model off the GPU
+(expert or KV offload, weight streaming) pay for it in copies, and a copy costs the step only the
+part of it that no kernel runs alongside. `ledger.transfers` names the region each copy fills or
+drains, sums bytes, time and exposed time per region and direction, flags pageable host memory and
+compares bandwidth with the host-to-device ceilings that `bwtest` also prints:
+
+```sh
+python -m ledger.transfers out --h2d-gbps <measured> --d2h-gbps <measured> --out transfers.md
+```
+
 ## Limits
 
 - Byte counts take each referenced weight as read once per launch and ignore activations and
@@ -93,6 +103,10 @@ python -m ledger.analyze out --ceiling-gbps <measured> --out report.md
   parameters cannot be decoded (we suspect a statically linked cudart; not confirmed). In the GB10
   case 22 of the 45 eager launches per step stay opaque; one of them streams `lm_head`.
 - Tested on NVIDIA GB10 (sm_121) with vLLM 0.31.
+
+- Copy addresses are decoded for linear copies (`cudaMemcpy[Async]`, `cuMemcpy[Async]`,
+  `cuMemcpy{HtoD,DtoH,DtoD}[Async]` and their per-thread-stream variants) and for memcpy nodes of
+  graphs. 2D/3D, peer and symbol copies are timed and counted but not attributed to a region.
 
 ## Next
 
