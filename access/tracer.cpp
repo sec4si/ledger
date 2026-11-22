@@ -5,7 +5,8 @@
 // launches of a step. Weights are read-only and already accounted for by the capture library; the
 // ranges listed in LEDGER_ACCESS_SKIP are left untracked.
 //
-// The window is counted in graph launches, as in the capture library: LEDGER_GRAPH_WINDOW=<skip>:<take>.
+// The window is the profiling range (cudaProfilerStart/Stop), as in the capture library, or is
+// counted in graph launches with LEDGER_GRAPH_WINDOW=<skip>:<take>.
 // Tensor-map copies (cp.async.bulk.tensor, TMA) are not instrumented by the Sanitizer API; a launch
 // that moves data only that way shows no accesses here.
 //
@@ -15,10 +16,14 @@
 //   LEDGER_ACCESS_ANCHOR    count the window in launches of this kernel (exact name) instead of graph
 //                           launches; for programs that run graphs node by node
 //   LEDGER_ACCESS_PATCHES   path of patches.fatbin
-//   LEDGER_ACCESS_SKIP      text file, one "<begin> <end>" decimal byte range per line
+//   LEDGER_ACCESS_SKIP      text file, one "<begin> <end>" decimal byte range per line; or "auto": when the
+//                           window opens, skip the weights listed in LEDGER_OUT/regions-<pid>.json
 //   LEDGER_ACCESS_GRANULE   log2 of the granule size in bytes (default 10, at least 5)
 //   LEDGER_ACCESS_SLOTS     log2 of the granule table size (default 22)
 //   LEDGER_ACCESS_EVENTS    event log capacity (default 8388608)
+//
+// Launches made through the driver API also carry their parameters ("params": [[offset, size, hex], ...],
+// as in the capture library), so the analysis can follow the pointers of launches it cannot see into.
 //
 // Output, per process: access-<pid>.bin (event words, see access.h), access-masks-<pid>.bin (one uint32
 // sub-block mask per event), access-launches-<pid>.jsonl
@@ -31,6 +36,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstring>
+#include <iterator>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -54,17 +61,49 @@ struct LaunchKernelParams {
   CUfunction f;
   unsigned int gx, gy, gz, bx, by, bz, smem;
   CUstream hStream;
+  void** kernelParams;
 };
 struct LaunchKernelExParams {
   const CUlaunchConfig* config;
+  CUfunction f;
+  void** kernelParams;
 };
 
+std::string hex(const void* p, size_t n) {
+  static const char* digits = "0123456789abcdef";
+  std::string out;
+  for (size_t i = 0; i < n; ++i) {
+    const unsigned char c = static_cast<const unsigned char*>(p)[i];
+    out += digits[c >> 4];
+    out += digits[c & 15];
+  }
+  return out;
+}
+
+// "[[offset,size,hex],...]" of a launch, or empty when the layout or the values are unavailable.
+std::string param_json(CUfunction f, void** params) {
+  if (!f || !params) return "";
+  std::string out = "[";
+  for (size_t i = 0;; ++i) {
+    size_t off = 0, size = 0;
+    if (cuFuncGetParamInfo(f, i, &off, &size) != CUDA_SUCCESS &&
+        cuKernelGetParamInfo(reinterpret_cast<CUkernel>(f), i, &off, &size) != CUDA_SUCCESS)
+      break;
+    if (i) out += ",";
+    out += "[" + std::to_string(off) + "," + std::to_string(size) + ",\"" + hex(params[i], size) + "\"]";
+  }
+  return out + "]";
+}
+
 struct State {
-  std::mutex mu;
+  std::recursive_mutex mu;  // synchronizing inside a callback re-enters the synchronize callback
   std::string out = "ledger-out", patches;
   long skip = -1, take = 0;
   long graph_launches = 0;
   long current_graph_launch = -1;
+  bool profiler_range = false;  // no LEDGER_GRAPH_WINDOW: follow cudaProfilerStart/Stop
+  bool skip_auto = false;       // read the weights from this process's regions file
+  std::string pending_params;   // of the driver launch whose launch callback comes next
   std::string anchor;
   long anchor_launches = 0;
   bool dump_pending = false;  // memory copies do not work inside a launch callback; dump at the next API call
@@ -92,12 +131,38 @@ std::string escape(const char* s) {
   return out;
 }
 
+std::vector<unsigned long long> merge(std::vector<std::pair<unsigned long long, unsigned long long>> r);
+
 std::vector<unsigned long long> read_ranges(const char* path) {
   std::vector<std::pair<unsigned long long, unsigned long long>> r;
   std::ifstream in(path);
   unsigned long long b, e;
   while (in >> b >> e)
     if (e > b) r.emplace_back(b, e);
+  return merge(std::move(r));
+}
+
+// Weights of a Ledger regions file (a JSON list of flat objects with "kind", "addr" and "size").
+std::vector<unsigned long long> read_weight_regions(const std::string& path) {
+  std::ifstream in(path);
+  std::string text((std::istreambuf_iterator<char>(in)), {});
+  std::vector<std::pair<unsigned long long, unsigned long long>> r;
+  const auto number = [&](const std::string& obj, const char* key) -> unsigned long long {
+    const auto at = obj.find(key);
+    return at == std::string::npos ? 0 : std::stoull(obj.substr(at + std::strlen(key)));
+  };
+  for (size_t start = text.find('{'); start != std::string::npos; start = text.find('{', start + 1)) {
+    const auto end = text.find('}', start);
+    if (end == std::string::npos) break;
+    const std::string obj = text.substr(start, end - start);
+    if (obj.find("\"kind\": \"weight\"") == std::string::npos) continue;
+    const unsigned long long addr = number(obj, "\"addr\": "), size = number(obj, "\"size\": ");
+    if (addr && size) r.emplace_back(addr, addr + size);
+  }
+  return merge(std::move(r));
+}
+
+std::vector<unsigned long long> merge(std::vector<std::pair<unsigned long long, unsigned long long>> r) {
   std::sort(r.begin(), r.end());
   std::vector<unsigned long long> merged;
   for (auto [b2, e2] : r) {
@@ -122,6 +187,11 @@ bool prepare(CUcontext ctx, Sanitizer_StreamHandle stream) {
   State& s = S();
   if (s.ready) return true;
   s.ctx = ctx;
+  if (s.skip_auto) {
+    s.skip_ranges = read_weight_regions(s.out + "/regions-" + std::to_string(getpid()) + ".json");
+    fprintf(stderr, "ledger-access: pid %d skips %zu weight ranges from its regions file\n", getpid(),
+            s.skip_ranges.size() / 2);
+  }
   const size_t slots = size_t{1} << s.slots_log2;
   void *keys, *cur, *log, *masks, *counters, *skip, *launches;
   const size_t n_launch = kMaxLaunches + 1;
@@ -183,7 +253,7 @@ std::string span(uint64_t base, uint64_t width, uint64_t height, uint64_t depth,
 
 void on_copy(const char* name, const std::string& reads, const std::string& writes) {
   State& s = S();
-  std::lock_guard<std::mutex> lock(s.mu);
+  std::lock_guard<std::recursive_mutex> lock(s.mu);
   if (!s.active || s.next_id >= kMaxLaunches) return;
   const unsigned int id = s.next_id++;
   s.meta.push_back("{\"id\":" + std::to_string(id) + ",\"name\":\"" + name + "\",\"reads\":" + reads +
@@ -192,7 +262,7 @@ void on_copy(const char* name, const std::string& reads, const std::string& writ
 
 void on_launch(const Sanitizer_LaunchData& d, bool graph) {
   State& s = S();
-  std::lock_guard<std::mutex> lock(s.mu);
+  std::lock_guard<std::recursive_mutex> lock(s.mu);
   count_anchor(d);
   Launch* data = nullptr;
   if (s.active && s.next_id < kMaxLaunches && prepare(d.context, d.hStream)) {
@@ -203,10 +273,11 @@ void on_launch(const Sanitizer_LaunchData& d, bool graph) {
                      std::to_string(d.gridDim_z) + "],\"block\":[" + std::to_string(d.blockDim_x) + "," +
                      std::to_string(d.blockDim_y) + "," + std::to_string(d.blockDim_z) + "],\"graph\":" +
                      (graph ? "true" : "false") + ",\"graph_launch\":" + std::to_string(s.current_graph_launch) +
-                     "}");
+                     (!graph && !s.pending_params.empty() ? ",\"params\":" + s.pending_params : std::string()) + "}");
   } else if (s.ready) {
     data = s.d_launches + kMaxLaunches;
   }
+  if (!graph) s.pending_params.clear();
   sanitizerSetLaunchCallbackData(d.hLaunch, d.function, graph ? d.hApiStream : d.hStream, data);
 }
 
@@ -271,7 +342,29 @@ void SANITIZERAPI callback(void*, Sanitizer_CallbackDomain domain, Sanitizer_Cal
     case SANITIZER_CB_DOMAIN_DRIVER_API: {
       auto* cb = static_cast<const Sanitizer_CallbackData*>(data);
       if (cb->callbackSite != SANITIZER_API_ENTER) break;
-      std::lock_guard<std::mutex> lock(s.mu);
+      std::lock_guard<std::recursive_mutex> lock(s.mu);
+      if (s.active && (cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel || cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel_ptsz)) {
+        auto* p = static_cast<const LaunchKernelParams*>(cb->functionParams);
+        s.pending_params = param_json(p->f, p->kernelParams);
+      } else if (s.active && (cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx ||
+                              cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx_ptsz)) {
+        auto* p = static_cast<const LaunchKernelExParams*>(cb->functionParams);
+        s.pending_params = param_json(p->f, p->kernelParams);
+      }
+      if (s.profiler_range) {
+        if (cbid == SANITIZER_CBID_DRIVER_API_cuProfilerStart) {
+          s.active = true;
+          s.current_graph_launch = 0;
+          fprintf(stderr, "ledger-access: pid %d profiler range opens\n", getpid());
+        } else if (cbid == SANITIZER_CBID_DRIVER_API_cuProfilerStop && s.active) {
+          s.active = false;
+          fprintf(stderr, "ledger-access: pid %d profiler range closes\n", getpid());
+          Sanitizer_StreamHandle h = nullptr;
+          cuCtxSynchronize();
+          if (s.ready && check(sanitizerGetStreamHandle(cb->context, nullptr, &h), "stream handle")) dump(h);
+        }
+        break;
+      }
       if (!s.anchor.empty()) {
         if (!s.dump_pending || s.dumped) break;
         CUstream stream = nullptr;
@@ -337,7 +430,7 @@ void SANITIZERAPI callback(void*, Sanitizer_CallbackDomain domain, Sanitizer_Cal
       break;
     case SANITIZER_CB_DOMAIN_SYNCHRONIZE: {
       auto* d = static_cast<const Sanitizer_SynchronizeData*>(data);
-      std::lock_guard<std::mutex> lock(s.mu);
+      std::lock_guard<std::recursive_mutex> lock(s.mu);
       if (s.anchor.empty() && !s.active && s.graph_launches > s.skip + s.take && s.skip >= 0) dump(d->hStream);
       break;
     }
@@ -353,15 +446,21 @@ int init() {
   if (const char* v = getenv("LEDGER_GRAPH_WINDOW")) {
     if (sscanf(v, "%ld:%ld", &s.skip, &s.take) != 2 || s.skip < 0 || s.take <= 0) s.skip = -1;
   }
-  if (const char* v = getenv("LEDGER_ACCESS_SKIP")) s.skip_ranges = read_ranges(v);
+  if (const char* v = getenv("LEDGER_ACCESS_SKIP")) {
+    if (std::string(v) == "auto")
+      s.skip_auto = true;
+    else
+      s.skip_ranges = read_ranges(v);
+  }
   if (const char* v = getenv("LEDGER_ACCESS_ANCHOR")) s.anchor = v;
   if (const char* v = getenv("LEDGER_ACCESS_GRANULE")) s.shift = static_cast<unsigned int>(atoi(v));
   if (const char* v = getenv("LEDGER_ACCESS_SLOTS")) s.slots_log2 = static_cast<unsigned int>(atoi(v));
   if (const char* v = getenv("LEDGER_ACCESS_EVENTS")) s.log_cap = static_cast<unsigned int>(atoll(v));
-  if (s.patches.empty() || s.skip < 0) {
-    fprintf(stderr, "ledger-access: set LEDGER_ACCESS_PATCHES and LEDGER_GRAPH_WINDOW\n");
+  if (s.patches.empty()) {
+    fprintf(stderr, "ledger-access: set LEDGER_ACCESS_PATCHES\n");
     return 0;
   }
+  s.profiler_range = s.skip < 0;
   Sanitizer_SubscriberHandle handle;
   if (!check(sanitizerSubscribe(&handle, callback, nullptr), "subscribe")) return 0;
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_RESOURCE, SANITIZER_CBID_RESOURCE_MODULE_LOADED);
@@ -370,13 +469,19 @@ int init() {
   for (auto id : {SANITIZER_CBID_DRIVER_API_cuLaunchKernel, SANITIZER_CBID_DRIVER_API_cuLaunchKernel_ptsz,
                   SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx, SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx_ptsz})
     sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, id);
+  sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, SANITIZER_CBID_DRIVER_API_cuProfilerStart);
+  sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, SANITIZER_CBID_DRIVER_API_cuProfilerStop);
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_LAUNCH, SANITIZER_CBID_LAUNCH_BEGIN);
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_GRAPHS, SANITIZER_CBID_GRAPHS_NODE_LAUNCH_BEGIN);
   sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_SYNCHRONIZE);
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_MEMCPY, SANITIZER_CBID_MEMCPY_STARTING);
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_MEMSET, SANITIZER_CBID_MEMSET_STARTING);
-  fprintf(stderr, "ledger-access: window %ld:%ld, granule %u B, %zu skipped ranges\n", s.skip, s.take,
-          1u << s.shift, s.skip_ranges.size() / 2);
+  if (s.profiler_range)
+    fprintf(stderr, "ledger-access: profiler range window, granule %u B, %zu skipped ranges\n", 1u << s.shift,
+            s.skip_ranges.size() / 2);
+  else
+    fprintf(stderr, "ledger-access: window %ld:%ld, granule %u B, %zu skipped ranges\n", s.skip, s.take,
+            1u << s.shift, s.skip_ranges.size() / 2);
   return 0;
 }
 

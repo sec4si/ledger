@@ -21,8 +21,10 @@ python -m ledger.dataflow out --anchor <kernel> [--capture <capture dir>] [--lay
 - Tensor-map copies (TMA) are not instrumented. A launch that moves data only that way shows no
   accesses; the analysis then takes its pointers from a capture of the same program (`--capture`) and
   assumes it read and wrote everything they land in, so its blind spot can hide waste but not invent it.
-- The window must close at least two anchor launches before the program ends; the log is written then.
+- Without `LEDGER_GRAPH_WINDOW` the window is the profiling range (`cudaProfilerStart`/`Stop`), as with
+  the capture library; the log is written when the range closes. With a launch-count window it must
+  close at least two anchor launches before the program ends.
 
-`selftest.cu` has three kernels with known patterns. Under the tracer (`LEDGER_ACCESS_ANCHOR=_Z9fill_halfPf
-LEDGER_GRAPH_WINDOW=0:3`) the analysis must report 256 KiB of dead writes per step, all from
+`selftest.cu` has three kernels with known patterns. Under the tracer (`LEDGER_ACCESS_ANCHOR=_Z9fill_halfPf` and
+either `LEDGER_GRAPH_WINDOW=0:3` or `SELFTEST_PROFILER=1`) the analysis must report 256 KiB of dead writes per step, all from
 `write_lows`, and a hand-off from `fill_half` to `read_all`.

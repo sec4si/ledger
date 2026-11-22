@@ -1,10 +1,12 @@
 """Follow data through the launches of a step: who wrote what, who read it, and what nobody read.
 
 Input is an access trace (`access/`: for every launch, the 1 KiB granules it read and wrote, with
-32-byte sub-block masks, plus the byte ranges of memcpy/memset calls) and a capture of the same
-program (`capture/`), whose pointer parameters stand in for the launches the tracer cannot see into
-(tensor-map copies). Such a launch is taken to read and write everything its pointers land in: the
-named region, or else the whole allocation segment. Memory the host maps for kernels (pinned
+32-byte sub-block masks, the byte ranges of memcpy/memset calls, and the parameters of driver-API
+launches) and optionally a capture of the same program (`capture/`) for launch times. Launches that
+move data through tensor maps (a 128-byte parameter) or show no access at all are only partly seen;
+each is taken to read and write everything its pointers land in: the named region; else the run of
+traced granules starting at the pointer (the tensor other launches wrote or read there); else the
+whole allocation segment (from --layout, or the "segment" entries of the regions file). Memory the host maps for kernels (pinned
 segments) is written and read by the CPU unseen and counts as live. Weights are not traced.
 
 Reported per step, over the full steps of the window:
@@ -134,6 +136,7 @@ def main():
     steps = split_steps([names[i] for i in kernel_ids], args.anchor)
     steps = [[kernel_ids[j] for j in s] for s in steps]
     params, durations = [None] * len(steps[0]), [0.0] * len(steps[0])
+    by_id = {m["id"]: m for m in meta}
     if args.capture:
         _mem, nodes, clones, direct, kernels = A.load(args.capture)
         cap_steps = split_steps([k["name"] for k in kernels], args.anchor)
@@ -151,22 +154,55 @@ def main():
     n_steps = len(steps)
     full = n_steps - 1  # the last step's writes stay unresolved
 
+    # The trace's own regions and parameters: a capture is another process, with other addresses.
     regions = []
-    for path in glob.glob(os.path.join(args.capture or args.access, "regions-*.json")):
+    for path in glob.glob(os.path.join(args.access, "regions-*.json")) or glob.glob(
+        os.path.join(args.capture or args.access, "regions-*.json")
+    ):
         regions += json.load(open(path))
     layout = json.load(open(args.layout)) if args.layout else {"std_dev_segments": [], "host_pinned_segments": []}
+    layout["std_dev_segments"] += [r for r in regions if r["kind"] == "segment"]
+    regions = [r for r in regions if r["kind"] != "segment"]
     cont = Containers(regions, layout["std_dev_segments"], layout["host_pinned_segments"])
 
     # Launches the tracer saw nothing of, and what their pointers land in.
     seen = Counter(lid.tolist())
     blind = defaultdict(list)  # container -> launch ids
-    blind_launches = [i for i in kernel_ids if not seen[i]]
+
+    def launch_params(i):
+        own = by_id[i].get("params")
+        return own if own else (params[position[i]] or {}).get("params")
+
+    tensor_map = lambda i: any(size == 128 for _o, size, _h in launch_params(i) or [])
+    blind_launches = [i for i in kernel_ids if not seen[i] or tensor_map(i)]
+    wild = []  # opaque launches without parameters: they may have touched anything
+    observed = set(gran.tolist())
+    run_of, run_start = {}, set()  # granule -> pointer runs covering it
     for i in blind_launches:
-        p = params[position[i]]
+        p = {"params": launch_params(i)}
+        if not p["params"]:
+            wild.append(i)
+            continue
         hits = set()
-        for v in pointer_words(p["params"] if p else []):
-            for c in cont.all_of(v):
-                hits.add(c[2])
+        for v in pointer_words(p["params"]):
+            named = cont._find(cont.named, v)
+            if named:
+                hits.add(named[2])
+            elif (v >> shift) in observed:
+                # The tensor behind a pointer is taken to be the run of traced granules starting there:
+                # what other launches wrote or read around it.
+                g0 = v >> shift
+                if g0 not in run_start:
+                    g = g0
+                    while g in observed:
+                        run_of.setdefault(g, []).append("run:%x" % g0)
+                        g += 1
+                    run_start.add(g0)
+                hits.add("run:%x" % g0)
+            else:
+                seg = cont._find(cont.segments, v)
+                if seg:
+                    hits.add(seg[2])
         for c in hits:
             blind[c].append(i)
 
@@ -199,7 +235,8 @@ def main():
             continue
         c = cont.of(addr)
         region = c[2] if c else "unnamed"
-        blinds = sorted(i for cc in cont.all_of(addr) for i in blind.get(cc[2], []))
+        containers = [cc[2] for cc in cont.all_of(addr)] + run_of.get(g, [])
+        blinds = sorted([i for cc in containers for i in blind.get(cc, [])] + wild)
         pending = []
         for j in range(s, e):
             L, k, m = int(lid[j]), int(kind[j]), int(mask[j])
@@ -235,19 +272,21 @@ def main():
         for p in pending:
             open_[p["w"]] += popcount(p["un"]) * sub_bytes
 
+    print(f"opaque launches: {len(blind_launches)} ({sum(1 for i in blind_launches if seen[i])} partly seen), "
+          f"without parameters: {len(wild)}", file=__import__("sys").stderr)
     report(args, steps, full, names, label, position, durations, written, dead, live, open_, dead_by_region,
-           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, params)
+           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, set(blind), wild)
 
 
 def report(args, steps, full, names, label, position, durations, written, dead, live, open_, dead_by_region,
-           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, params):
+           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, blind_containers, wild):
     out = []
     emit = out.append
     in_full = lambda i: any(i in s for s in steps[:full])
     per = lambda c: sum(v for i, v in c.items() if in_full(i)) / full
     emit(f"# Ledger dataflow: `{os.path.basename(os.path.abspath(args.access))}`\n")
     emit(f"{len(steps)} steps in the window, {full} resolved; {len(steps[0])} kernel launches per step, "
-         f"{len(blind_launches) // len(steps)} of them opaque to the tracer (tensor-map copies). "
+         f"{len(blind_launches) // len(steps)} of them only partly seen (tensor-map copies). "
          f"Granule {1 << shift} B, sub-block {(1 << shift) // SUB} B. Weights not traced.\n")
     emit("## Writes per step\n")
     emit("| | MB per step |\n|---|---|")
@@ -302,7 +341,8 @@ def report(args, steps, full, names, label, position, durations, written, dead, 
     emit("")
 
     emit("## Constant inputs (hoisting candidates)\n")
-    emit("Launches whose traced reads all land on memory nobody wrote during the window.\n")
+    emit("Launches whose traced reads all land on memory nobody wrote during the window, and no partly seen "
+         "launch may have written.\n")
     written_g = set(gran[kind == 1].tolist())
     reads = defaultdict(set)
     for L, g in zip(lid[kind == 0].tolist(), gran[kind == 0].tolist()):
@@ -311,7 +351,11 @@ def report(args, steps, full, names, label, position, durations, written, dead, 
     for s in steps:
         for i in s:
             gs = reads.get(i)
-            if gs and not (gs & written_g) and not any(cont.pinned_at(g << shift) for g in gs):
+            if wild:
+                continue  # a partly seen launch without parameters may have written anything
+            if gs and not (gs & written_g) and not any(cont.pinned_at(g << shift) for g in gs) and not any(
+                c[2] in blind_containers for g in gs for c in cont.all_of(g << shift)
+            ):
                 const[label(i)] += 1
     if const:
         emit("| kernel | per step | us each |\n|---|---|---|")

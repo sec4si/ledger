@@ -58,6 +58,11 @@ def dump_regions(worker, out_dir):
             for j, tensor in enumerate(tensors):
                 add("cache", f"{layer_name}[{i}][{j}]", tensor)
 
+    # Allocation segments of the caching allocator: where an unnamed pointer's tensor can lie.
+    for seg in torch.cuda.memory_snapshot():
+        regions.append({"kind": "segment", "name": "segment", "addr": seg["address"], "size": seg["total_size"],
+                        "shape": [], "dtype": ""})
+
     path = Path(out_dir) / f"regions-{os.getpid()}.json"
     path.write_text(json.dumps(regions))
     return len(regions)

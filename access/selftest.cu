@@ -2,8 +2,11 @@
 //   fill_half   writes bytes [0, 512 KiB) of a 1 MiB buffer
 //   read_all    reads the whole buffer
 //   write_lows  writes bytes [0, 512) of every KiB
-// Run with LEDGER_ACCESS_ANCHOR=fill_half and LEDGER_GRAPH_WINDOW=2:2; selftest_check.py checks the log.
+// Run with LEDGER_ACCESS_ANCHOR=_Z9fill_halfPf and LEDGER_GRAPH_WINDOW=0:3, or with SELFTEST_PROFILER=1
+// (profiling range around steps 1 to 3) and no window; see README.md for the expected analysis.
 #include <cstdio>
+#include <cstdlib>
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
 __global__ void fill_half(float* b) {
@@ -23,7 +26,10 @@ int main() {
   float *buf, *out;
   cudaMalloc(&buf, 1 << 20);
   cudaMalloc(&out, 4);
+  const bool profiler = getenv("SELFTEST_PROFILER") != nullptr;
   for (int step = 0; step < 6; ++step) {
+    if (profiler && step == 1) cudaProfilerStart();
+    if (profiler && step == 4) cudaProfilerStop();
     fill_half<<<512, 256>>>(buf);
     read_all<<<1024, 256>>>(buf, out);
     write_lows<<<512, 256>>>(buf);
