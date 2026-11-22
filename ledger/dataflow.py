@@ -44,12 +44,14 @@ def load_access(path):
     info = json.load(open(glob.glob(os.path.join(path, "access-meta-*.json"))[0]))
     ev = np.fromfile(glob.glob(os.path.join(path, "access-[0-9]*.bin"))[0], dtype=np.uint64)
     masks = np.fromfile(glob.glob(os.path.join(path, "access-masks-*.bin"))[0], dtype=np.uint32)
+    pc_files = glob.glob(os.path.join(path, "access-pcs-*.bin"))
+    pcs = np.fromfile(pc_files[0], dtype=np.uint64) if pc_files else np.zeros(len(ev), dtype=np.uint64)
     ok = ev != np.uint64(2**64 - 1)
-    ev, masks = ev[ok], masks[ok]
+    ev, masks, pcs = ev[ok], masks[ok], pcs[ok]
     lid = (ev >> np.uint64(44)).astype(np.int64)
     kind = ((ev >> np.uint64(43)) & np.uint64(1)).astype(np.int64)
     gran = (ev & np.uint64((1 << 43) - 1)).astype(np.int64)
-    return meta, info["granule_shift"], lid, kind, gran, masks.astype(np.int64)
+    return meta, info["granule_shift"], lid, kind, gran, masks.astype(np.int64), pcs.astype(np.int64)
 
 
 def range_events(meta, shift):
@@ -119,14 +121,16 @@ def main():
     ap.add_argument("--anchor", required=True)
     ap.add_argument("--layout", help="mem_layout.json of the recording (allocation and pinned segments)")
     ap.add_argument("--ceiling-gbps", type=float, default=0)
+    ap.add_argument("--cubins", help="directory of the program's cubins: show the SASS of dead stores")
     ap.add_argument("--out")
     args = ap.parse_args()
 
-    meta, shift, lid, kind, gran, mask = load_access(args.access)
+    meta, shift, lid, kind, gran, mask, pcs = load_access(args.access)
     extra = range_events(meta, shift)
     if extra:
         e = np.array(extra, dtype=np.int64)
         lid, kind, gran, mask = (np.concatenate([a, e[:, i]]) for i, a in enumerate((lid, kind, gran, mask)))
+        pcs = np.concatenate([pcs, np.zeros(len(e), dtype=np.int64)])
     kernel_ids = [m["id"] for m in meta if m["name"] not in ("memcpy", "memset")]
     names = {m["id"]: m["name"] for m in meta}
     pretty = A.demangle(list(set(names.values())))
@@ -208,7 +212,7 @@ def main():
 
     # Per granule, events in launch order; a launch's reads come before its writes.
     order = np.lexsort((kind, lid, gran))
-    gran, lid, kind, mask = gran[order], lid[order], kind[order], mask[order]
+    gran, lid, kind, mask, pcs = gran[order], lid[order], kind[order], mask[order], pcs[order]
     bounds = np.flatnonzero(np.diff(gran)) + 1
     starts = np.concatenate([[0], bounds])
     ends = np.concatenate([bounds, [len(gran)]])
@@ -219,6 +223,7 @@ def main():
     live = Counter()      # launch -> bytes read later
     open_ = Counter()     # launch -> bytes unresolved at the end of the window
     dead_by_region = Counter()
+    dead_by_pc = Counter()  # (function, offset) -> bytes
     handoff = Counter()   # (writer position, reader position) -> bytes
     next_kernel = dict(zip(kernel_ids, kernel_ids[1:]))
 
@@ -262,9 +267,12 @@ def main():
                         p["dead"] += nbytes
                         if step_of.get(p["w"], full) < full:
                             dead_by_region[A.group_name(region)] += nbytes
+                            fn = names[p["w"]]
+                            if p["pc"] and by_id[p["w"]].get("pc"):
+                                dead_by_pc[(fn, p["pc"] - by_id[p["w"]]["pc"])] += nbytes
                         p["un"] &= ~m
                 written[L] += popcount(m) * sub_bytes
-                pending.append({"w": L, "m0": m, "un": m, "readers": set(), "dead": 0})
+                pending.append({"w": L, "m0": m, "un": m, "readers": set(), "dead": 0, "pc": int(pcs[j])})
             for p in pending:
                 if not p["un"]:
                     settle(p)
@@ -275,11 +283,12 @@ def main():
     print(f"opaque launches: {len(blind_launches)} ({sum(1 for i in blind_launches if seen[i])} partly seen), "
           f"without parameters: {len(wild)}", file=__import__("sys").stderr)
     report(args, steps, full, names, label, position, durations, written, dead, live, open_, dead_by_region,
-           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, set(blind), wild)
+           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, set(blind), wild, dead_by_pc, pretty)
 
 
 def report(args, steps, full, names, label, position, durations, written, dead, live, open_, dead_by_region,
-           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, blind_containers, wild):
+           handoff, blind_launches, kernel_ids, lid, kind, gran, mask, shift, cont, blind_containers, wild,
+           dead_by_pc, pretty):
     out = []
     emit = out.append
     in_full = lambda i: any(i in s for s in steps[:full])
@@ -308,6 +317,20 @@ def report(args, steps, full, names, label, position, durations, written, dead, 
     for name, (w, d, n) in sorted(by_kernel.items(), key=lambda x: -x[1][1])[:15]:
         if d:
             emit(f"| `{name}` | {n / full:.0f} | {w / full / 1e6:.2f} | {d / full / 1e6:.2f} | {d / w * 100:.0f}% |")
+    emit("")
+    emit("## Dead writes by instruction\n")
+    if dead_by_pc:
+        cubins = None
+        if args.cubins:
+            from ledger.sass import Cubins
+
+            cubins = Cubins(args.cubins)
+        emit("| kernel | offset | dead MB/step | instruction | source |\n|---|---|---|---|---|")
+        for (fn, off), d in dead_by_pc.most_common(12):
+            ins, src = cubins.at(fn, off) if cubins else ("", "")
+            emit(f"| `{A.short(pretty[fn], 50)}` | 0x{off:x} | {d / full / 1e6:.2f} | `{ins}` | {src} |")
+    else:
+        emit("No PCs in the trace.")
     emit("")
     emit("## Dead writes by region\n")
     emit("| region | dead MB/step |\n|---|---|")

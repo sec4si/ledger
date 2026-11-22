@@ -19,7 +19,7 @@ __device__ bool skipped(const Tables& t, unsigned long long a) {
 
 // Claim the (granule, kind) slot for this launch and return the index of its event, or ~0u when the
 // event cannot be logged. Called by one lane per group of lanes touching the same granule.
-__device__ unsigned int claim(const Launch& l, unsigned long long g, unsigned int k) {
+__device__ unsigned int claim(const Launch& l, unsigned long long g, unsigned int k, unsigned long long pc) {
   const Tables& t = l.t;
   unsigned int h = static_cast<unsigned int>((g * 0x9E3779B97F4A7C15ull) >> 40) & t.mask;
   const unsigned long long key = g + 1;
@@ -62,6 +62,7 @@ __device__ unsigned int claim(const Launch& l, unsigned long long g, unsigned in
     }
     t.log[n] = (static_cast<unsigned long long>(l.id) << kLaunchShift) |
                (static_cast<unsigned long long>(k) << kKindShift) | g;
+    t.pcs[n] = pc;
     atomicAdd(&t.counters[5], 1u);
     atomicExch(cur, me | n);
     return n;
@@ -69,7 +70,8 @@ __device__ unsigned int claim(const Launch& l, unsigned long long g, unsigned in
 }
 
 // kinds: bit 0 read, bit 1 write.
-__device__ void touch(void* userdata, unsigned long long addr, unsigned long long bytes, unsigned int kinds) {
+__device__ void touch(void* userdata, unsigned long long pc, unsigned long long addr, unsigned long long bytes,
+                      unsigned int kinds) {
   if (!userdata || !bytes) return;
   const Launch& l = *static_cast<const Launch*>(userdata);
   if (!l.enabled || skipped(l.t, addr)) return;
@@ -90,7 +92,7 @@ __device__ void touch(void* userdata, unsigned long long addr, unsigned long lon
       const unsigned int group = __match_any_sync(__activemask(), (g << 1) | k);
       const int leader = __ffs(group) - 1;
       unsigned int n = 0;
-      if (static_cast<int>(lane) == leader) n = claim(l, g, k);
+      if (static_cast<int>(lane) == leader) n = claim(l, g, k, pc);
       n = __shfl_sync(group, n, leader);
       if (n != ~0u) atomicOr(&l.t.masks[n], bits);
     }
@@ -99,37 +101,37 @@ __device__ void touch(void* userdata, unsigned long long addr, unsigned long lon
 
 }  // namespace
 
-extern "C" __device__ __noinline__ SanitizerPatchResult LedgerGlobal(void* u, uint64_t, void* ptr, uint32_t size,
+extern "C" __device__ __noinline__ SanitizerPatchResult LedgerGlobal(void* u, uint64_t pc, void* ptr, uint32_t size,
                                                                      uint32_t flags, const void*) {
   unsigned int kinds = 0;
   if (flags & SANITIZER_MEMORY_DEVICE_FLAG_READ) kinds |= 1;
   if (flags & SANITIZER_MEMORY_DEVICE_FLAG_WRITE) kinds |= 2;
   if (flags & SANITIZER_MEMORY_DEVICE_FLAG_PREFETCH) kinds = 0;
-  if (kinds) touch(u, reinterpret_cast<uintptr_t>(ptr), size, kinds);
+  if (kinds) touch(u, pc, reinterpret_cast<uintptr_t>(ptr), size, kinds);
   return SANITIZER_PATCH_SUCCESS;
 }
 
-extern "C" __device__ __noinline__ SanitizerPatchResult LedgerMemcpyAsync(void* u, uint64_t, void* src, uint32_t,
+extern "C" __device__ __noinline__ SanitizerPatchResult LedgerMemcpyAsync(void* u, uint64_t pc, void* src, uint32_t,
                                                                           uint32_t size) {
-  if (src) touch(u, reinterpret_cast<uintptr_t>(src), size, 1);
+  if (src) touch(u, pc, reinterpret_cast<uintptr_t>(src), size, 1);
   return SANITIZER_PATCH_SUCCESS;
 }
 
-extern "C" __device__ __noinline__ SanitizerPatchResult LedgerBulkGlobalToShared(void* u, uint64_t, uint64_t src,
+extern "C" __device__ __noinline__ SanitizerPatchResult LedgerBulkGlobalToShared(void* u, uint64_t pc, uint64_t src,
                                                                                  uint32_t, uint32_t, uint32_t data,
                                                                                  uint32_t) {
-  touch(u, src, 16ull * (data & 0xffff), 1);
+  touch(u, pc, src, 16ull * (data & 0xffff), 1);
   return SANITIZER_PATCH_SUCCESS;
 }
 
-extern "C" __device__ __noinline__ SanitizerPatchResult LedgerBulkSharedToGlobal(void* u, uint64_t, uint64_t dst,
+extern "C" __device__ __noinline__ SanitizerPatchResult LedgerBulkSharedToGlobal(void* u, uint64_t pc, uint64_t dst,
                                                                                  uint32_t, uint32_t blocks) {
-  touch(u, dst, 16ull * blocks, 2);
+  touch(u, pc, dst, 16ull * blocks, 2);
   return SANITIZER_PATCH_SUCCESS;
 }
 
-extern "C" __device__ __noinline__ SanitizerPatchResult LedgerBulkReduceSharedToGlobal(void* u, uint64_t, uint64_t dst,
+extern "C" __device__ __noinline__ SanitizerPatchResult LedgerBulkReduceSharedToGlobal(void* u, uint64_t pc, uint64_t dst,
                                                                                        uint32_t, uint32_t blocks) {
-  touch(u, dst, 16ull * blocks, 3);
+  touch(u, pc, dst, 16ull * blocks, 3);
   return SANITIZER_PATCH_SUCCESS;
 }

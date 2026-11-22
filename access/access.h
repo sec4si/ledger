@@ -16,6 +16,7 @@ struct Tables {
   unsigned long long* cur;         // per slot and kind: (launch id + 1) << 32 | its event index
   unsigned long long* log;         // first touch of a granule by a launch, per kind
   unsigned int* masks;             // sub-blocks touched, per event
+  unsigned long long* pcs;         // program counter of the access that logged the event
   unsigned int* counters;          // [0] events, [1] dropped events, [2] table overflow, [3] claim retries,
                                    // [5] claims
   const unsigned long long* skip;  // sorted, disjoint [begin, end) pairs left untracked (weights)

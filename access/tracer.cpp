@@ -26,7 +26,8 @@
 // as in the capture library), so the analysis can follow the pointers of launches it cannot see into.
 //
 // Output, per process: access-<pid>.bin (event words, see access.h), access-masks-<pid>.bin (one uint32
-// sub-block mask per event), access-launches-<pid>.jsonl
+// sub-block mask per event), access-pcs-<pid>.bin (one uint64 PC per event; launches carry their
+// function's start "pc"), access-launches-<pid>.jsonl
 // ({"id","name","grid","block","graph","graph_launch"}; memcpy and memset calls take ids from the same
 // sequence and appear as {"id","name":"memcpy"|"memset","reads":[[b,e]...],"writes":[[b,e]...]}) and
 // access-meta-<pid>.json.
@@ -122,6 +123,13 @@ State& S() {
   return *s;
 }
 
+// Start PC of a function, so that event PCs can be turned into offsets into its SASS.
+uint64_t function_pc(CUmodule module, const char* name) {
+  uint64_t pc = 0, size = 0;
+  if (module && name && sanitizerGetFunctionPcAndSize(module, name, &pc, &size) == SANITIZER_SUCCESS) return pc;
+  return 0;
+}
+
 std::string escape(const char* s) {
   std::string out;
   for (; s && *s; ++s) {
@@ -193,12 +201,13 @@ bool prepare(CUcontext ctx, Sanitizer_StreamHandle stream) {
             s.skip_ranges.size() / 2);
   }
   const size_t slots = size_t{1} << s.slots_log2;
-  void *keys, *cur, *log, *masks, *counters, *skip, *launches;
+  void *keys, *cur, *log, *masks, *pcs, *counters, *skip, *launches;
   const size_t n_launch = kMaxLaunches + 1;
   if (!check(sanitizerAlloc(ctx, &keys, slots * 8), "alloc keys") ||
       !check(sanitizerAlloc(ctx, &cur, slots * 16), "alloc cur") ||
       !check(sanitizerAlloc(ctx, &log, size_t{s.log_cap} * 8), "alloc log") ||
       !check(sanitizerAlloc(ctx, &masks, size_t{s.log_cap} * 4), "alloc masks") ||
+      !check(sanitizerAlloc(ctx, &pcs, size_t{s.log_cap} * 8), "alloc pcs") ||
       !check(sanitizerAlloc(ctx, &counters, 32), "alloc counters") ||
       !check(sanitizerAlloc(ctx, &skip, std::max<size_t>(16, s.skip_ranges.size() * 8)), "alloc skip") ||
       !check(sanitizerAlloc(ctx, &launches, n_launch * sizeof(Launch)), "alloc launches"))
@@ -212,6 +221,7 @@ bool prepare(CUcontext ctx, Sanitizer_StreamHandle stream) {
     check(sanitizerMemcpyHostToDeviceAsync(skip, s.skip_ranges.data(), s.skip_ranges.size() * 8, stream), "copy skip");
   s.t = Tables{static_cast<unsigned long long*>(keys), static_cast<unsigned long long*>(cur),
                static_cast<unsigned long long*>(log), static_cast<unsigned int*>(masks),
+               static_cast<unsigned long long*>(pcs),
                static_cast<unsigned int*>(counters),
                static_cast<const unsigned long long*>(skip), static_cast<unsigned int>(s.skip_ranges.size() / 2),
                s.log_cap, static_cast<unsigned int>(slots - 1), s.shift};
@@ -273,6 +283,7 @@ void on_launch(const Sanitizer_LaunchData& d, bool graph) {
                      std::to_string(d.gridDim_z) + "],\"block\":[" + std::to_string(d.blockDim_x) + "," +
                      std::to_string(d.blockDim_y) + "," + std::to_string(d.blockDim_z) + "],\"graph\":" +
                      (graph ? "true" : "false") + ",\"graph_launch\":" + std::to_string(s.current_graph_launch) +
+                     ",\"pc\":" + std::to_string(function_pc(d.module, d.functionName)) +
                      (!graph && !s.pending_params.empty() ? ",\"params\":" + s.pending_params : std::string()) + "}");
   } else if (s.ready) {
     data = s.d_launches + kMaxLaunches;
@@ -290,9 +301,11 @@ void dump(Sanitizer_StreamHandle stream) {
   const unsigned int n = std::min(counters[0], s.log_cap);
   std::vector<unsigned long long> log(n);
   std::vector<unsigned int> masks(n);
+  std::vector<unsigned long long> pcs(n);
   if (n) {
     check(sanitizerMemcpyDeviceToHost(log.data(), s.t.log, size_t{n} * 8, stream), "read log");
     check(sanitizerMemcpyDeviceToHost(masks.data(), s.t.masks, size_t{n} * 4, stream), "read masks");
+    check(sanitizerMemcpyDeviceToHost(pcs.data(), s.t.pcs, size_t{n} * 8, stream), "read pcs");
   }
   mkdir(s.out.c_str(), 0755);
   const std::string pid = std::to_string(getpid());
@@ -302,6 +315,10 @@ void dump(Sanitizer_StreamHandle stream) {
   }
   if (FILE* f = fopen((s.out + "/access-masks-" + pid + ".bin").c_str(), "wb")) {
     fwrite(masks.data(), 4, n, f);
+    fclose(f);
+  }
+  if (FILE* f = fopen((s.out + "/access-pcs-" + pid + ".bin").c_str(), "wb")) {
+    fwrite(pcs.data(), 8, n, f);
     fclose(f);
   }
   if (FILE* f = fopen((s.out + "/access-launches-" + pid + ".jsonl").c_str(), "w")) {
