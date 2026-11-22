@@ -22,6 +22,8 @@ def main():
     ap.add_argument("plan")
     ap.add_argument("results")
     ap.add_argument("--access", help="the access trace the plan came from: tell read from never-read bytes")
+    ap.add_argument("--rows", action="store_true", help="the plan was cut by rows (perturb_plan --rows): report per row")
+    ap.add_argument("--ranges", action="store_true", help="the plan was cut by range (perturb_plan --by-range)")
     ap.add_argument("--out")
     args = ap.parse_args()
 
@@ -113,6 +115,50 @@ def main():
     emit(f"\nTested {total / 1e6:.1f} MB of writes in one step, {free / 1e6:.1f} MB unused"
          + (f", of which {free_read / 1e6:.1f} MB is read by a later launch: computed on and then dropped." if readers else ".")
          + "\n")
+    if args.rows:
+        by_row = defaultdict(lambda: [0, 0, 0])  # row -> tested, unused, unused and read later
+        cells = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # kernel -> row -> tested, unused
+        for x, tokens_same, _logits_same in rows:
+            r = by_row[x["chunk"]]
+            r[0] += x["bytes"]
+            cell = cells[A.short(pretty[x["kernel"]], 50)][x["chunk"]]
+            cell[0] += x["bytes"]
+            if tokens_same:
+                r[1] += x["bytes"]
+                r[2] += read_later(x) if readers else 0
+                cell[1] += x["bytes"]
+        emit("## By row (row -1: writes that do not split into rows)\n")
+        emit("| row | tested MB | unused MB | unused % | unused and read later MB |\n|---|---|---|---|---|")
+        for row, (t, u, rl) in sorted(by_row.items()):
+            emit(f"| {row} | {t / 1e6:.1f} | {u / 1e6:.1f} | {u / t * 100:.0f}% | {rl / 1e6:.1f} |")
+        emit("\n## Unused share per kernel and row\n")
+        all_rows = sorted(by_row)
+        emit("| kernel | " + " | ".join(f"row {r}" for r in all_rows) + " |")
+        emit("|---|" + "---|" * len(all_rows))
+        for name, cs in sorted(cells.items(), key=lambda kv: -sum(c[0] for c in kv[1].values()))[:20]:
+            emit(f"| `{name}` | " + " | ".join(
+                f"{cs[r][1] / cs[r][0] * 100:.0f}%" if cs[r][0] else "" for r in all_rows) + " |")
+        emit("")
+    if args.ranges:
+        # chunk k*100 + r: row r of the k-th range; k*100 - 1: the whole k-th range.
+        per_kernel = defaultdict(lambda: defaultdict(lambda: {"bytes": 0, "unused": 0, "rows": {}}))
+        for x, tokens_same, _logits_same in rows:
+            k = (x["chunk"] + 1) // 100
+            cell = per_kernel[(A.short(pretty[x["kernel"]], 45), x["occurrence"])][k]
+            cell["bytes"] += x["bytes"]
+            cell["unused"] += x["bytes"] if tokens_same else 0
+            if x["chunk"] - k * 100 >= 0:
+                cell["rows"][x["chunk"] - k * 100] = tokens_same
+        emit("## By tensor (first launch of each kernel in the step)\n")
+        emit("Each contiguous range a launch wrote, in address order; rows marked `.` used, `x` unused.\n")
+        emit("| kernel | tensor | KB | unused % | rows |\n|---|---|---|---|---|")
+        firsts = sorted((key for key in per_kernel if key[1] == 0),
+                        key=lambda key: -sum(c["bytes"] for c in per_kernel[key].values()))
+        for key in firsts[:15]:
+            for k, c in sorted(per_kernel[key].items()):
+                marks = "".join("x" if c["rows"][r] else "." for r in sorted(c["rows"]))
+                emit(f"| `{key[0]}` | {k} | {c['bytes'] / 1e3:.0f} | {c['unused'] / c['bytes'] * 100:.0f}% | {marks} |")
+        emit("")
     text = "\n".join(out) + "\n"
     if args.out:
         open(args.out, "w").write(text)

@@ -11,7 +11,16 @@ list of kernels it launches in its baseline step, finds that step in the trace, 
   writes cut into at most --chunks pieces;
 - <out>.json: the same experiments with their position in the step, for the report.
 
-    python -m ledger.perturb_plan <access dir> <launches file> <out prefix> [--chunks 4] [--min-bytes 4096]
+    python -m ledger.perturb_plan <access dir> <launches file> <out prefix> [--chunks 4 | --rows N | --by-range N]
+        [--min-bytes 4096]
+
+With --by-range N every contiguous range a launch wrote (one tensor, as far as the trace can tell) is
+its own experiment, chunk k for the k-th range; ranges of at least --row-min bytes that divide into N
+rows of whole 32-byte sub-blocks are cut into those rows instead, chunk k * 100 + row.
+
+With --rows N each contiguous write is cut into N equal rows (the tokens a decode step verifies: one plus
+the draft tokens), and row r of every range a launch wrote forms one experiment; writes that do not
+divide into N rows of whole 32-byte sub-blocks form one more experiment, row -1.
 """
 
 import argparse
@@ -55,6 +64,9 @@ def main():
     ap.add_argument("launches")
     ap.add_argument("out")
     ap.add_argument("--chunks", type=int, default=4)
+    ap.add_argument("--rows", type=int, default=0)
+    ap.add_argument("--by-range", type=int, default=0)
+    ap.add_argument("--row-min", type=int, default=65536)
     ap.add_argument("--min-bytes", type=int, default=4096)
     args = ap.parse_args()
 
@@ -91,7 +103,29 @@ def main():
         ranges = merge(writes.get(i, []))
         if sum(e - b for b, e in ranges) < args.min_bytes:
             continue
-        for c, piece in enumerate(chunks(ranges, args.chunks)):
+        if args.by_range:
+            pieces = []
+            for k, (b, e) in enumerate(ranges):
+                n = e - b
+                if n >= args.row_min and n % (args.by_range * sub) == 0:
+                    row = n // args.by_range
+                    pieces += [(k * 100 + r, [(b + r * row, b + (r + 1) * row)]) for r in range(args.by_range)]
+                else:
+                    pieces.append((k * 100 - 1, [(b, e)]))
+        elif args.rows:
+            by_row = {}
+            for b, e in ranges:
+                n = e - b
+                if n % (args.rows * sub) == 0:
+                    step_bytes = n // args.rows
+                    for r in range(args.rows):
+                        by_row.setdefault(r, []).append((b + r * step_bytes, b + (r + 1) * step_bytes))
+                else:
+                    by_row.setdefault(-1, []).append((b, e))
+            pieces = sorted(by_row.items())
+        else:
+            pieces = list(enumerate(chunks(ranges, args.chunks)))
+        for c, piece in pieces:
             plan.append({"position": p, "id": i, "kernel": name, "occurrence": occ, "chunk": c,
                          "ranges": [[b, e - b] for b, e in piece], "bytes": sum(e - b for b, e in piece)})
     with open(args.out + ".experiments", "w") as f:
