@@ -60,6 +60,21 @@ Any other CUDA program works the same way: preload the library, bracket the wind
 with `cudaProfilerStart`/`cudaProfilerStop`, and write the memory map as `regions-<pid>.json`
 (a list of `{kind, name, addr, size, shape, dtype}`; see `ledger/vllm_regions.py`).
 
+Programs that never call `cudaProfilerStart` can open the window by graph launch count instead:
+`LEDGER_GRAPH_WINDOW=<skip>:<take>` opens it at the graph launch numbered `<skip>` and closes it
+before the one numbered `<skip>+<take>`. Close it while the program is still running: kernels still
+in flight when the window closes get bogus end times, so capture one step more than you need and
+drop the last. CUPTI's worker threads do not survive `fork()`; for programs that fork one process
+per GPU, set `LEDGER_INIT_IN_CHILD=1` so that each child starts CUPTI itself.
+
+A [Sibyl](https://github.com/GeetoRinku/sibyl) replay keeps the recorded addresses, so the
+recording's memory map applies to it unchanged:
+
+```sh
+python -m ledger.sibyl_regions <recording>/ranges-rank0-<pid>.json out
+LD_PRELOAD=$PWD/capture/libledger.so LEDGER_OUT=out LEDGER_GRAPH_WINDOW=8:44 <replay program> ...
+```
+
 Analyze:
 
 ```sh

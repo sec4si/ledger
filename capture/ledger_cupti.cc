@@ -6,6 +6,11 @@
 // records kernel timings through the CUPTI activity API. The analysis step joins the two to tell
 // which memory each launch touched and how long it took.
 //
+// Programs that never call cudaProfilerStart/Stop (a replay runtime driving recorded graphs, for
+// example) can open the range by graph launch count instead: LEDGER_GRAPH_WINDOW=<skip>:<take>
+// opens it at the cuGraphLaunch numbered <skip> (counting from 0) and closes it just before the
+// one numbered <skip>+<take>.
+//
 // Output directory: $LEDGER_OUT (default ./ledger-out). One set of JSONL files per process:
 //   nodes-<pid>.jsonl     graph kernel nodes  {"id","name","grid","block","smem","params"}
 //   clones-<pid>.jsonl    node clones made at instantiation {"id","orig"}
@@ -17,14 +22,17 @@
 #include <cuda_runtime_api.h>
 #include <cupti.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,6 +50,15 @@ struct Out {
 std::mutex g_mu;
 Out g_nodes{"nodes"}, g_clones{"clones"}, g_launches{"launches"}, g_kernels{"kernels"};
 std::atomic<bool> g_in_range{false};
+std::atomic<long> g_graph_launches{0};
+long g_window_skip = -1, g_window_take = 0;
+// Flushing activity buffers from inside a CUPTI callback can deadlock on CUPTI's own lock, so a
+// range closed from a callback hands the flush to this thread.
+// Never destroyed: the flusher thread is still waiting on them when the process exits.
+std::mutex& g_flush_mu = *new std::mutex;
+std::condition_variable& g_flush_cv = *new std::condition_variable;
+bool g_flush_pending = false;
+pid_t g_flusher_pid = 0;  // a forked child has no flusher until it closes a range itself
 CUpti_SubscriberHandle g_sub;
 
 FILE* open_out(const char* stem) {
@@ -178,16 +195,46 @@ void record_graph_nodes(CUgraph graph) {
   free(nodes);
 }
 
-void set_range(bool on) {
+void flusher() {
+  std::unique_lock<std::mutex> lock(g_flush_mu);
+  for (;;) {
+    g_flush_cv.wait(lock, [] { return g_flush_pending; });
+    g_flush_pending = false;
+    lock.unlock();
+    const CUptiResult r = cuptiActivityFlushAll(1);
+    {
+      // A child that ends with _exit() never closes its files; put everything on disk now.
+      std::lock_guard<std::mutex> out_lock(g_mu);
+      for (Out* o : {&g_nodes, &g_clones, &g_launches, &g_kernels})
+        if (o->f) fflush(o->f);
+    }
+    fprintf(stderr, "ledger: pid %d flushed (cupti %d)\n", getpid(), static_cast<int>(r));
+    lock.lock();
+  }
+}
+
+void set_range(bool on, bool in_callback = true) {
   if (on == g_in_range.exchange(on)) return;
   if (on) {
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-  } else {
-    cuptiActivityFlushAll(1);
-    cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-    cuptiActivityFlushAll(1);
+    return;
   }
+  cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+  if (!in_callback) {
+    cuptiActivityFlushAll(1);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_flush_mu);
+    g_flush_pending = true;
+    if (g_flusher_pid != getpid()) {
+      g_flusher_pid = getpid();
+      std::thread(flusher).detach();
+    }
+  }
+  g_flush_cv.notify_one();
 }
+
 
 // nvcc gives a kernel's host stub the kernel's mangled name, so the stub address names the kernel.
 const char* stub_name(const void* stub) {
@@ -225,6 +272,16 @@ void on_driver(const CUpti_CallbackData* cb, CUpti_CallbackId id) {
     }
     case CUPTI_DRIVER_TRACE_CBID_cuProfilerStart: set_range(true); break;
     case CUPTI_DRIVER_TRACE_CBID_cuProfilerStop: set_range(false); break;
+    case CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch:
+    case CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz: {
+      const long n = g_graph_launches.fetch_add(1);
+      if (n == g_window_skip || n == g_window_skip + g_window_take)
+        fprintf(stderr, "ledger: pid %d graph launch %ld, range %s\n", getpid(), n,
+                n == g_window_skip ? "opens" : "closes");
+      if (n == g_window_skip) set_range(true);
+      if (n == g_window_skip + g_window_take) set_range(false);
+      break;
+    }
     default: break;
   }
 }
@@ -322,14 +379,19 @@ void CUPTIAPI buffer_completed(CUcontext, uint32_t, uint8_t* buffer, size_t, siz
   free(buffer);
 }
 
-__attribute__((constructor)) void ledger_init() {
+void ledger_start() {
   cuptiActivityRegisterCallbacks(buffer_requested, buffer_completed);
   cuptiSubscribe(&g_sub, callback, nullptr);
   const CUpti_CallbackId driver[] = {
       CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel,   CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz,
       CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx, CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz,
-      CUPTI_DRIVER_TRACE_CBID_cuProfilerStart,  CUPTI_DRIVER_TRACE_CBID_cuProfilerStop};
+      CUPTI_DRIVER_TRACE_CBID_cuProfilerStart,  CUPTI_DRIVER_TRACE_CBID_cuProfilerStop,
+      CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch,    CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz};
   for (auto id : driver) cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_DRIVER_API, id);
+  if (const char* w = getenv("LEDGER_GRAPH_WINDOW")) {
+    if (sscanf(w, "%ld:%ld", &g_window_skip, &g_window_take) != 2 || g_window_skip < 0 || g_window_take <= 0)
+      g_window_skip = -1;
+  }
   const CUpti_CallbackId runtime[] = {
       CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000,       CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000,
       CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060,   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060,
@@ -339,8 +401,22 @@ __attribute__((constructor)) void ledger_init() {
   cuptiEnableCallback(1, g_sub, CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_GRAPHNODE_CLONED);
 }
 
+// CUPTI's worker threads do not survive fork(), so a child of an already initialised process can
+// record launches but never gets its activity buffers back. For programs that fork one process per
+// GPU, LEDGER_INIT_IN_CHILD=1 leaves the parent untraced and starts CUPTI in each child instead.
+__attribute__((constructor)) void ledger_init() {
+  const char* child = getenv("LEDGER_INIT_IN_CHILD");
+  if (child && *child == '1')
+    pthread_atfork(nullptr, nullptr, ledger_start);
+  else
+    ledger_start();
+}
+
 __attribute__((destructor)) void ledger_fini() {
-  set_range(false);
+  if (g_window_skip >= 0)
+    fprintf(stderr, "ledger: %ld graph launches, window %ld:%ld\n", g_graph_launches.load(), g_window_skip,
+            g_window_take);
+  set_range(false, false);
   cuptiActivityFlushAll(1);
   for (Out* o : {&g_nodes, &g_clones, &g_launches, &g_kernels})
     if (o->f) fclose(o->f);
