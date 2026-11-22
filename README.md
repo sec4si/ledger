@@ -19,8 +19,8 @@ Ledger is part of the [sec4si](https://sec4.si) research ecosystem.
 ## What it found on DGX Spark
 
 On a DGX Spark (GB10) running Qwen3.8-27B NVFP4 with MTP speculative decoding in vLLM, the
-output projection of the Gated DeltaNet layers took 186 us per launch while the attention output
-projection, the same CUTLASS kernel on a weight of the same shape, took 138 us. In isolation the
+output projection of the Gated DeltaNet layers took 195 us per launch while the attention output
+projection, the same CUTLASS kernel on a weight of the same shape, took 147 us. In isolation the
 two weights run at identical speed. The difference is the GDN decode kernel that runs just
 before: with three draft tokens it writes a full 3.15 MB recurrent state for each of four
 positions, 12.6 MB per layer, and those dirty lines are flushed from L2 while the projection
@@ -73,9 +73,10 @@ python -m ledger.analyze out --ceiling-gbps <measured> --out report.md
   prefill or large batches.
 - Pointers are found by scanning parameter bytes for addresses inside known regions. Kernels that
   take pointers indirectly (pointer arrays in device memory) are invisible to it.
-- Runtime-API launches from a library with a statically linked cudart can only be decoded when the
-  same kernel also appears in a CUDA graph. In the GB10 case about 22 small eager launches per step
-  stay opaque; one of them streams `lm_head`.
+- Some runtime-API launches reach the callback with neither a function handle nor a symbol name,
+  and neither `cudaGetFuncBySymbol` nor `dladdr` on the host stub resolves them, so their
+  parameters cannot be decoded (we suspect a statically linked cudart; not confirmed). In the GB10
+  case 22 of the 45 eager launches per step stay opaque; one of them streams `lm_head`.
 - Tested on NVIDIA GB10 (sm_121) with vLLM 0.31.
 
 ## Next

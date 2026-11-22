@@ -1,0 +1,9 @@
+case	dram__bytes_read.sum	dram__bytes_write.sum	gpu__time_duration.sum
+clean 0MB	nan	nan	155,456
+dirty 0MB	nan	nan	145,536
+clean 4MB	nan	nan	151,776
+dirty 4MB	nan	nan	168,160
+clean 12MB	nan	nan	146,400
+dirty 12MB	nan	nan	193,408
+clean 24MB	nan	nan	145,664
+dirty 24MB	nan	nan	210,912

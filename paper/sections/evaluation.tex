@@ -1,0 +1,109 @@
+\section{Evaluation of \sys{}}\label{sec:eval}
+
+\subsection{What a name-level profile shows}\label{sec:namelevel}
+
+Profilers such as Nsight Systems summarize kernels by name. \Cref{tab:namelevel} applies that
+grouping and \sys{}'s grouping to the same 38\,880 launches of the batch-1 capture. By name, the
+CUTLASS FP8 GEMM is a single row: 148 launches and 66.7\,ms per step, spread over seven weight
+groups plus one launch without parameters, with a coefficient of variation of 1.92. Nothing in that row distinguishes a 47\,\textmu s
+excess on one weight group from the expected spread of different shapes. Split by weight, shape
+and grid, each group is tight (the 10th to 90th percentile range is under 4\% of the median), and the GDN \texttt{out\_proj} and attention \texttt{o\_proj} groups, which share the
+kernel, the grid and the shape, sit 47\,\textmu s apart.
+
+Grouping by name and grid does not help either: the grid $[1,80,1]$ that the two projections
+share is also used by the MLP \texttt{down\_proj} of the FP8 layers, which has a different shape.
+The split becomes visible only when each launch knows its weight. An Nsight Systems timeline does
+carry the information in principle, and a person who already suspects these two projections can
+find it by hand; that is how we found it. The point of the per-launch books is that nobody has to
+suspect it first.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Group & launches/step & ms/step & median (\textmu s) & p10--p90 (\textmu s) \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{By kernel name}} \\
+CUTLASS sm120 FP8 GEMM & 148 & 66.67 & 328.3 & 150.0--406.5 \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{Same launches, by weight, shape and grid}} \\
+\texttt{linear\_attn.in\_proj\_qkvz} $[5120,16384]$ & 48 & 17.98 & 374.2 & 368.9--379.8 \\
+\texttt{lm\_head} $[5120,248320]$ & 3 & 16.73 & 5565.8 & 5554.0--5606.5 \\
+\texttt{linear\_attn.out\_proj} $[6144,5120]$ & 48 & 9.33 & \textbf{194.6} & 190.6--197.5 \\
+\texttt{mlp.gate\_up\_proj} $[5120,34816]$ & 8 & 6.25 & 779.7 & 774.2--791.7 \\
+\texttt{self\_attn.qkv\_proj} $[5120,14336]$ & 16 & 5.24 & 327.2 & 321.6--332.5 \\
+\texttt{mlp.down\_proj} $[17408,5120]$ & 8 & 3.23 & 404.3 & 395.7--410.5 \\
+\texttt{self\_attn.o\_proj} $[6144,5120]$ & 16 & 2.36 & \textbf{147.3} & 144.5--149.6 \\
+(no parameters; an \texttt{lm\_head} read, \cref{sec:coverage}) & 1 & 5.56 & & \\
+\bottomrule
+\end{tabular}
+\caption{One CUTLASS kernel, grouped by name and by what each launch read. Batch 1, 40 steps.}\label{tab:namelevel}
+\end{table}
+
+\subsection{Capture overhead}\label{sec:overhead}
+
+We ran the batch-1 decode window six times at a locked 2000\,MHz clock, alternating runs without
+and with the capture library preloaded. Without it, steps took 122.06, 122.24 and 122.63\,ms;
+with it, 122.64, 122.91 and 122.52\,ms. The mean difference is 0.38\,ms (0.3\%), smaller than the
+spread among the runs without the library (0.57\,ms), and the last pair is inverted. Outside the
+window the library records only graph nodes at instantiation, which happens during warm-up. The
+uninstrumented baseline here has no CUPTI subscriber at all, so the figure includes the cost of
+kernel activity records, which any tracing profiler pays as well.
+
+\subsection{Coverage}\label{sec:coverage}
+
+Of the 972 launches per step in the batch-1 window, 927 are graph kernel nodes and 45 are direct
+launches. All graph nodes resolve. Of the direct launches, 22 per step (880 in the window) carry
+no parameters: they are runtime launches for which the callback receives neither
+a function handle nor a symbol name, \texttt{cudaGetFuncBySymbol} fails, and the host stub has no
+symbol \texttt{dladdr} can find, so neither the runtime lookup nor the by-name fallback applies.
+We suspect the launching code uses a cudart other than the one the lookup goes through (a
+statically linked copy, for instance), but have not confirmed it. Most are small PyTorch elementwise and indexing
+kernels. One is the \texttt{lm\_head} GEMM of a draft step, the same CUTLASS kernel that appears
+in the graphs, whose layout \sys{} therefore knows; it is lost only because its name is unknown at
+launch time. This is why \sys{} counts three of the four \texttt{lm\_head} reads per step.
+\sys{} attributes 24.20\,GB of weight
+reads per step; adding the one unattributed \texttt{lm\_head} read (1.27\,GB) gives 25.47\,GB,
+which matches the 25.5\,GB we had computed by hand, before \sys{} existed, from the weight sizes
+and the number of forward passes per step.
+
+\subsection{Hardware counters}\label{sec:ncu}
+
+The timing experiments of \cref{sec:split} infer the write-back from durations. To observe it
+directly we profiled the isolated GEMM with Nsight Compute, in application replay mode and with
+Nsight Compute's own cache flushing disabled, so that each measured launch sees the L2 state its
+predecessor left. Before every GEMM a 256\,MB read sweep empties L2 without leaving dirty lines;
+then a predecessor either reads or writes $N$\,MiB. On GB10, Nsight Compute reports the \texttt{dram\_\_bytes} metrics as not available; we use L2 counters instead (\cref{tab:ncu}).
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Predecessor & GEMM time & L2 requests & L2 fills from memory & L2 data-bank accesses \\
+ & (\textmu s) & (sectors) & (sectors) & (sectors) \\
+\midrule
+none & 154--160 & 1\,250\,k & 986\,k & 2\,246\,k \\
+read 4\,MiB & 169 & 1\,250\,k & 986\,k & 2\,265\,k \\
+write 4\,MiB & 171 & 1\,250\,k & 986\,k & 2\,352\,k \\
+read 12\,MiB & 158 & 1\,250\,k & 986\,k & 2\,244\,k \\
+write 12\,MiB & 198 & 1\,250\,k & 986\,k & 2\,510\,k \\
+read 24\,MiB & 153 & 1\,250\,k & 986\,k & 2\,244\,k \\
+write 24\,MiB & 213 & 1\,250\,k & 986\,k & 2\,595\,k \\
+\bottomrule
+\end{tabular}
+\caption{Nsight Compute on the isolated $6144\times5120$ FP8 GEMM at $M=4$ after a read-only or a
+writing predecessor (medians of three launches; \texttt{lts\_\_t\_sectors}, \texttt{lts\_\_d\_sectors\_fill\_sysmem}, \texttt{lts\_\_d\_sectors}).}\label{tab:ncu}
+\end{table}
+
+The GEMM's own traffic is the same in every case to within 0.2\%: 1.25\,M sectors requested and
+986\,k sectors (31.6\,MB; the weight is 31.5\,MB) filled from memory. A read-only predecessor
+leaves the counters unchanged. A writing predecessor adds L2 data-bank accesses during the GEMM that grow
+with the bytes written: 107\,k, 264\,k and 349\,k sectors more than without a predecessor for
+4, 12 and 24\,MiB, while the GEMM
+takes 171, 198 and 213\,\textmu s. Under replay the timings are noisier than in
+\cref{sec:split} (the runs without a predecessor span 154--160\,\textmu s, and the 4\,MiB read case
+took 169\,\textmu s with almost no extra data-bank traffic), so the counters are the cleaner
+signal here. We read the extra accesses as dirty lines being read out of
+the data banks for write-back; the counter does not name its cause, but nothing else in the
+launch differs. They amount to 81\% and 67\% of the sectors written for 4 and 12\,MiB; the rest is presumably
+written back before the GEMM starts. At 24\,MiB, a full L2, the share drops to 44\%.

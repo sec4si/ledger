@@ -1,0 +1,9 @@
+lock: All done.
+off-r1 exit=0 LEDGER_DECODE steps=40 batch=1 ms_per_step=122.061
+on-r1 exit=0 LEDGER_DECODE steps=40 batch=1 ms_per_step=122.639
+off-r2 exit=0 LEDGER_DECODE steps=40 batch=1 ms_per_step=122.242
+on-r2 exit=0 LEDGER_DECODE steps=40 batch=1 ms_per_step=122.906
+off-r3 exit=0 LEDGER_DECODE steps=40 batch=1 ms_per_step=122.632
+on-r3 exit=0 LEDGER_DECODE steps=40 batch=1 ms_per_step=122.517
+reset: All done.
+OVERHEAD_DONE

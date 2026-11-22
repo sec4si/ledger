@@ -1,0 +1,17 @@
+\begin{abstract}
+Profilers summarize GPU time by kernel name. In LLM decode the same GEMM kernel streams dozens of
+different weights per step, and the cost of one kernel's writes can surface as the next kernel's
+time, so name-level totals hide exactly the anomalies worth fixing. We present \sys{}, which keeps
+the books per launch: it captures the parameter bytes of every kernel launch, including every
+kernel node of every CUDA graph, resolves their pointers against a memory map exported by the
+engine, and so knows which weight each launch streamed and which caches it touched. It compares
+each launch with a measured bandwidth ceiling and flags launches of the same kernel on same-shaped
+weights whose times diverge, naming the preceding kernel that touched a cache. On a DGX Spark
+running Qwen3.8-27B with multi-token-prediction speculative decoding in vLLM, the output
+projection of the Gated DeltaNet layers took 194.6\,\textmu s while the attention output
+projection, the same kernel on a weight of the same shape, took 147.3\,\textmu s. The cause is the
+preceding recurrent-state update, which writes 12.6\,MB of state per layer, one copy per token of the step,
+of which only the accepted position's is read again; the dirty lines are written back on the projection's time. Deferring
+those stores is bit-identical and raises serving throughput by 5.2\% and 7.5\% at concurrency 4
+and 8; the change has been submitted to vLLM. The capture overhead, 0.3\% of step time, is within run-to-run variation.
+\end{abstract}

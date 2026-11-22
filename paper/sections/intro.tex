@@ -1,0 +1,63 @@
+\section{Introduction}\label{sec:intro}
+
+In small-batch large language model (LLM) decoding, projection kernels have
+little opportunity to amortize weight reads across tokens. Comparing the
+estimated weight traffic with a measured streaming bandwidth ceiling can
+therefore give a first estimate of step time
+\cite{williams2009roofline,deakin2016babelstream}. Finding the source of the
+remaining time requires more context. The same GPU kernel can implement
+projections in many layers, and its runtime can depend on the cache state
+left by earlier launches. A kernel-name summary combines these instances.
+A timeline preserves their order, but identifying the model tensors associated
+with each instance requires additional information.
+
+Consider a batch-one decode trace from vLLM on an NVIDIA DGX Spark. A
+kernel-name summary puts 148 CUTLASS FP8 launches per step in one row.
+This includes seven weight groups and one launch without captured parameters
+(\cref{tab:namelevel}). Two groups share the same launch grid and weight
+shape. The median runtime was 194.6~\(\mu\)s for Gated DeltaNet (GDN)
+output projections and 147.3~\(\mu\)s for attention output projections. Four representative weights from the two groups took
+147.5~\(\mu\)s each when tested in isolation. Writing 8~MiB before the
+same isolated GEMM increased its time to 187.4~\(\mu\)s
+(\cref{sec:split}). In a separate read-versus-write control, L2 data-bank
+accesses during the GEMM rose with preceding writes while L2 requests and
+fills stayed flat. GB10 does not expose DRAM counters, so this supports
+the write-back explanation indirectly (\cref{sec:ncu}). In the engine,
+the recurrent update produces several versions of the state for speculative
+decoding, leaving dirty lines in L2 that can be evicted as the following
+projection streams its weights.
+
+We present \sys{}, a tool and diagnostic workflow for per-launch accounting
+in steady-state decoding. \sys{} joins GPU timing records with available
+CUDA kernel arguments, including arguments captured from instantiated CUDA
+graph nodes. It matches pointer values against an engine-exported memory map
+to associate launches with named model weights and cache regions. In the
+low-token regime studied here, the size of a referenced weight estimates
+the bytes streamed by its projection. Comparing this estimate with the
+bandwidth ceiling helps prioritize launches for investigation.
+\sys{} also reports repeated references to the same weight and compares
+timings across weight groups that share a kernel, grid, shape, and data
+type. Nearby launches that reference cache regions provide candidates for
+follow-up experiments that test whether preceding work accounts for a
+timing difference.
+
+We make three contributions.
+
+\begin{itemize}
+  \item A diagnostic workflow that combines a measured bandwidth baseline
+    with matched-launch comparisons and controlled changes to the preceding
+    workload to test for cross-kernel effects.
+  \item An open-source implementation\footnote{\url{https://github.com/sec4si/ledger}}
+    that joins CUDA launch timing and argument data with model tensor
+    identities and reports timing divergences and repeated weight
+    references.
+  \item A case study of Qwen3.8-27B NVFP4 with three speculative draft
+    tokens on DGX Spark. We first identified the projection anomaly
+    manually and subsequently reproduced it with \sys{}. We ported an
+    existing deferred-state-store scheme from the Triton path to the
+    fused CUDA path and submitted it to vLLM
+    \cite{vllmpr61434,vllmpr69160}. The CUDA change preserved
+    bitwise equality in kernel tests and greedy output tokens in the
+    tested decode runs. It increased serving throughput by 5.2\% and
+    7.5\% at concurrency four and eight, respectively, on this system.
+\end{itemize}

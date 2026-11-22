@@ -1,0 +1,36 @@
+\documentclass[10pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cleveref}
+
+\emergencystretch=3em
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\sys}{Ledger}
+
+\title{Whose Bill Is It? Per-Launch Accounting for LLM Decode on GPUs}
+\author{ZacharyZcR\\ \small sec4si \todo{affiliation, email}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\input{sections/abstract}
+\input{sections/intro}
+\input{sections/background}
+\input{sections/design}
+\input{sections/case-study}
+\input{sections/evaluation}
+\input{sections/related}
+\input{sections/limitations}
+\input{sections/conclusion}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}

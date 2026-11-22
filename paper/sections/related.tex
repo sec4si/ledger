@@ -1,0 +1,83 @@
+\section{Related Work}\label{sec:related}
+
+\paragraph{GPU profiling and performance models.}
+Nsight Systems provides individual CUDA events, kernel summaries, and
+reports that group kernels by NVTX range
+\cite{nvidiaNsightSystems}. PyTorch Profiler correlates GPU activities
+with framework events, and Holistic Trace Analysis uses those traces
+to analyze distributed workloads \cite{pytorchProfiler,pytorchHta}.
+Nsight Compute provides hardware counters and kernel rooflines. Its
+replay mode and cache controls affect the interpretation of measurements
+that depend on preceding launches \cite{nvidiaNsightCompute}. Operator
+Profiler associates these hardware counters with PyTorch operators
+\cite{chu2026operator}. PyTorch also supports semantic labels on graph
+nodes that are visible in replay traces \cite{pytorchGraphAnnotations}.
+\sys{} joins timing records with kernel arguments and a model memory
+map, making it possible to compare calls to the same kernel by the
+tensor each call references.
+
+The Roofline model bounds performance using operational intensity,
+compute throughput, and memory bandwidth \cite{williams2009roofline}.
+BabelStream measures attainable bandwidth on streaming workloads
+\cite{deakin2016babelstream}. AMD TraceLens reconstructs hierarchical
+timing breakdowns from profiler traces and uses operator models to
+estimate FLOPs and memory traffic. For attention rooflines, it can use
+per-step workload statistics from vLLM's optional trace annotations
+\cite{amdTracelens,vllmRooflineAnnotations}. StriaTrace fits empirical
+latency boundaries to detect anomalous serving steps and correlates
+trace data to help diagnose them \cite{wu2026striatrace}. AgentPerfBench
+collects per-kernel Nsight Compute profiles of agentic workloads and
+applies multidimensional roofline analysis to representative kernels
+\cite{lau2026agentperfbench}.
+\sys{} uses a measured read-bandwidth baseline and a weight-size
+estimate to guide controlled comparisons between launches with
+different tensor identities or preceding work.
+
+\paragraph{Tracing and memory attribution.}
+Mystique generates representative benchmarks by replaying operator-level
+PyTorch execution traces. Chakra standardizes operation graphs for
+benchmarking and system co-design
+\cite{liang2023mystique,sridharan2023chakra}. To reduce LLM serving
+cold starts, Medusa prepares CUDA graphs and KV-cache initialization
+metadata offline, and Foundry saves graph topology and execution
+context for template-based reconstruction
+\cite{zeng2025medusa,liu2026foundry}. \sys{} uses CUDA
+graph node metadata to interpret timings in a steady-state trace.
+NVBit supports instruction-level memory reference tracing
+\cite{villa2019nvbit}. Von Buelow et al. use instrumented memory
+references to simulate L1 and L2 behavior and estimate hit rates per
+allocation \cite{buelow2022finegrained}. DrGPUM correlates memory
+inefficiencies such as redundant or unused allocations with data objects
+and GPU API calls
+\cite{lin2023drgpum}. \sys{} uses launch arguments as a proxy for
+tensor references and measures the timing of the launches in the
+running engine.
+
+\paragraph{GPU interference across kernels.}
+Elvinger et al. characterize L2 cache pollution and bandwidth
+contention between colocated GPU workloads. Mosaic predicts the impact
+of kernel colocation for latency-aware scheduling, and CacheC manages
+L2 to improve kernel concurrency
+\cite{elvinger2025gpu,strati2026mosaic,xi2026cachec}.
+In GTX 1080 experiments, Yandrofski et al. observe larger victim-kernel
+slowdowns with concurrent L2 write workloads than with read workloads.
+They discuss dirty-line write-back as one possible contributor
+\cite{yandrofski2022enemies}. NVIDIA documents that an L2 miss can
+generate a DRAM write when it evicts a dirty line
+\cite{nvidiaComputeTriage}.
+Our case study examines the timing cost of this mechanism between
+successive kernels in a decode step.
+Matching the projection launches exposes the timing difference, and
+varying the preceding writes in isolation tests the explanation.
+
+\paragraph{Speculative decoding with recurrent state.}
+Speculative decoding verifies several candidate tokens at once, and
+multi-token prediction can provide those candidates
+\cite{leviathan2023fast,deepseekv3}. Gated DeltaNet maintains a recurrent
+state \cite{yang2025gated}. Its speculative implementation must recover
+the state at the accepted position. Prior vLLM changes proposed deferring
+intermediate state stores in the Triton implementation
+\cite{vllmpr61434,vllmpr64325}. Our case study traces
+the excess stores to both their originating kernel and the following
+projection, then evaluates a CUDA implementation that shares the
+Triton record layout \cite{vllmpr69160}.

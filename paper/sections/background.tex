@@ -1,0 +1,69 @@
+\section{Background}\label{sec:background}
+
+\subsection{Anatomy of an LLM Decode Step}
+
+Autoregressive decoding generates one or a few tokens per request per step.
+Unlike prefill, where matrix multiplications operate on long prompts and are compute-bound,
+low-batch decode has low arithmetic intensity: every step streams the model's full weight set
+from off-chip memory for a handful of token rows, making decode memory-bandwidth bound
+under the roofline model~\cite{williams2009roofline}.
+Each transformer or hybrid layer issues a sequence of weight-streaming GEMMs
+(input projections, output projection, and MLP projections), a sequence-mixing kernel
+(attention or a recurrent state update), and small glue kernels (RMSNorm, RoPE,
+activation quantization, residual adds).
+
+To avoid host-side launch latency across hundreds of short kernels per step,
+serving engines such as vLLM~\cite{kwon2023vllm} capture steady-state decode steps into
+CUDA graphs and replay them as a single submission.
+Inside a replayed graph, kernels execute back-to-back on the GPU with minimal inter-kernel
+idle time; performance is governed by how many bytes each launch moves and how close its
+effective bandwidth comes to the device's achievable memory bandwidth ceiling.
+Because a single compiled GEMM kernel template (for example, a CUTLASS FP8 kernel)
+is reused across dozens of weights in different layers, aggregating execution time by kernel
+name collapses distinct weights and distinct cache contexts into one number.
+
+\subsection{Speculative Decoding with Multi-Token Prediction}
+
+Speculative decoding~\cite{leviathan2023fast} raises arithmetic intensity during decode by
+verifying $k$ draft tokens in parallel alongside the current token, passing $k{+}1$ tokens
+per request through the main model in a single step.
+Because weight reads are amortized across all $k{+}1$ tokens, verification costs nearly the
+same memory traffic as a single-token step while yielding up to $k{+}1$ accepted tokens.
+
+Multi-Token Prediction (MTP)~\cite{deepseekv3} integrates drafting into the model itself via
+lightweight prediction heads that run after the main forward pass.
+With $k{=}3$ draft tokens, each decode step runs the main model on four tokens and then
+invokes the draft head three times sequentially, reading the vocabulary projection
+(\texttt{lm\_head}) once for the main model and once per draft step.
+
+\subsection{Hybrid Gated DeltaNet Models and State Rollback}
+
+Hybrid architectures interleave standard softmax attention layers with linear-time recurrent
+layers to reduce KV-cache growth at long contexts.
+Gated DeltaNet (GDN)~\cite{yang2025gated} maintains a fixed-size matrix-valued recurrent
+state per head---in Qwen3.8-27B, 48 heads of $128 \times 128$ in FP32, or 3.0~MiB per
+sequence per layer---across 48 of the model's 64 layers (with 16 standard attention layers).
+
+Speculative verification complicates in-place recurrent updates: if the verifier rejects
+draft token $j \in \{1, \dots, k\}$, the recurrent state must roll back to position $j{-}1$
+before the next step.
+The straightforward implementation writes the full updated state after every verified
+position into a dedicated slot.
+For $k{=}3$ draft tokens (four positions per step), a single GDN decode launch writes
+$4 \times 3.0 = 12$~MiB of recurrent state per request per layer, even though only the
+single slot at the last accepted position is ever read on the next step.
+When these stores land in a write-back L2 cache, the GDN kernel can retire quickly while
+leaving megabytes of dirty cache lines whose DRAM write-back traffic contends with the
+weight-streaming GEMM that immediately follows.
+
+\subsection{Target Platform: NVIDIA DGX Spark (GB10)}
+
+Our case study runs on an NVIDIA DGX Spark built around the GB10 SoC
+(\texttt{sm\_121}, 48 SMs, 24~MiB L2 cache) backed by 121~GB of unified LPDDR5x memory.
+While the datasheet quotes 273~GB/s peak bandwidth, microbenchmarks---our read-only
+streaming kernel (\texttt{bwtest}) and BabelStream~\cite{deakin2016babelstream}---consistently
+measure 248--253.5~GB/s (we use 252~GB/s as the practical ceiling).
+GB10 operates under a tight software power cap during sustained decode, causing whole-step
+wall-clock times to drift by 1--2~ms across runs even with the GPU clock locked at 2000~MHz.
+Reliable attribution on such hardware therefore requires per-kernel measurements paired with
+control kernels (unchanged layers and projections) rather than whole-step averages alone.

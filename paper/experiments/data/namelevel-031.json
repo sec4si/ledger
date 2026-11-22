@@ -1,0 +1,503 @@
+{
+ "steps": 40,
+ "names": [
+  {
+   "n": 5920,
+   "total_ms": 2666.9228169999997,
+   "median": 328.259,
+   "p10": 149.954,
+   "p90": 406.468,
+   "cv": 1.9216512394899943,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weights": 7
+  },
+  {
+   "n": 4480,
+   "total_ms": 1497.1901659999999,
+   "median": 423.076,
+   "p10": 230.786,
+   "p90": 436.292,
+   "cv": 0.30247771615065555,
+   "name": "_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_42MainloopSm120TmaWarpSpecializedBlockScaledILi3ELi3ENS5_IJNS4_1CILi1EEESB_SB_EEENS1_51KernelTmaWarpSpecializedCooperativeBlockScaledSm120ILi3EEEEENS5_IJNSA_ILi128EEENSA_ILi32EEENSA_ILi256EEEEEENS5_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS5_IJNS5_IJlSB_lEEENS4_6LayoutINS5_IJNS5_IJNS5_IJSH_NSA_ILi4EEEEEEiEEENS5_IJNS5_IJNSA_ILi16EEESP_EEEiEEENS5_IJSB_iEEEEEENS5_IJSU_NS5_IJNS5_IJNSA_ILi0EEESB_EEENSA_ILi512EEEEEENS5_IJSX_iEEEEEEEEEEESM_S14_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISK_SK_fSL_Li16EEEEEENSO_INS5_IJSP_NSA_ILi2EEESB_EEENS5_IJSB_SP_SX_EEEEENS5_IJSG_NSO_INS5_IJNSA_ILi8EEES1C_S1C_EEENS5_IJSB_SS_S1G_EEEEENSA_ILi64EEEEEEEENS5_IJNS4_13SM90_TMA_LOADES1N_EEENS5_IJNS4_14ComposedLayoutINS4_7SwizzleILi3ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi4EEENSO_INS5_IJS1G_SI_EEENS5_IJSI_SB_EEEEEEENSO_INS5_IJNS5_IJSQ_SB_EEENS5_IJST_SB_SP_EEEEEENS5_IJNS5_IJST_SZ_EEENS5_IJSY_SP_SZ_EEEEEEEEEEENS5_IJNS4_9Copy_AtomIJNS4_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS26_IJNS4_13UniversalCopyISL_SL_EESL_EEEEEENS4_8identityES1O_S25_S2E_S2F_EENS_8epilogue10collective18CollectiveEpilogueINS2H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSJ_NS5_IJS1K_SH_EEEvNS5_IJSB_llEEENS_10bfloat16_tES2N_NS2H_6fusion15FusionCallbacksINS2H_23Sm120TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEENS2P_17LinearCombinationIS2O_fvfLNS_15FloatRoundStyleE2EEESJ_S2M_JEEES1N_NS1P_IS1R_NS1S_ILi16EEENSO_INS5_IJS1K_S1G_EEENS5_IJSB_S1K_EEEEEEENS4_17SM75_U16x4_LDSM_TENS4_14SM90_TMA_STOREES31_NS4_17SM90_U16x4_STSM_TENS26_IJNS4_17SM90_U32x2_STSM_NENS_6half_tEEEEvEEENS1_25StaticPersistentSchedulerEvEEEEvNT_6ParamsE",
+   "weights": 2
+  },
+  {
+   "n": 400,
+   "total_ms": 281.205834,
+   "median": 593.8140000000001,
+   "p10": 252.674,
+   "p90": 1434.126,
+   "cv": 0.5791083027331672,
+   "name": "_ZN8internal5gemvx6kernelIii13__nv_bfloat16S2_S2_fLb0ELb1ELb1ELb0ELi7ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+   "weights": 5
+  },
+  {
+   "n": 2040,
+   "total_ms": 130.791687,
+   "median": 36.672,
+   "p10": 32.896,
+   "p90": 37.729,
+   "cv": 1.9468213412500823,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8EEvNT_6ParamsE",
+   "weights": 4
+  },
+  {
+   "n": 80,
+   "total_ms": 88.308275,
+   "median": 1126.0585,
+   "p10": 651.462,
+   "p90": 1545.806,
+   "cv": 0.4067086965673582,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8EEvNT_6ParamsE",
+   "weights": 2
+  },
+  {
+   "n": 1920,
+   "total_ms": 76.197185,
+   "median": 38.88,
+   "p10": 36.384,
+   "p90": 44.097,
+   "cv": 0.09005099486065192,
+   "name": "_ZN59_GLOBAL__N__0b960a40_26_fused_gdn_decode_kernel_cu_315660c331gdn_decode_post_conv_mtp_kernelIfLi3ELb0EEEvPK13__nv_bfloat16S3_S3_PKfPKvPKiS9_S9_PT_S3_S7_PS1_iiiibffNS_16GdnDecodeStridesE",
+   "weights": 1
+  },
+  {
+   "n": 680,
+   "total_ms": 14.972757,
+   "median": 21.76,
+   "p10": 17.024,
+   "p90": 26.625,
+   "cv": 0.14308978035857894,
+   "name": "_Z10kernel_mhajjjPKjfPKfP3VecI13__nv_bfloat16Lj256EEPKS5_S0_S2_11KVCacheListILb1EEjfS2_jjjPjPv",
+   "weights": 0
+  },
+  {
+   "n": 2520,
+   "total_ms": 14.97107,
+   "median": 5.44,
+   "p10": 5.28,
+   "p90": 7.361,
+   "cv": 0.16193092701780712,
+   "name": "triton_red_fused__to_copy_abs_add_clamp_cutlass_scaled_mm_div_fused_add_rms_norm_max_mul_reciprocal_unsqueeze_3",
+   "weights": 1
+  }
+ ],
+ "splits": [
+  {
+   "n": 1920,
+   "total_ms": 719.1382269999999,
+   "median": 374.244,
+   "p10": 368.9,
+   "p90": 379.811,
+   "cv": 0.018385910383065376,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.linear_attn.in_proj_qkvz.weight",
+   "shape": [
+    5120,
+    16384
+   ],
+   "grid": [
+    1,
+    256,
+    1
+   ]
+  },
+  {
+   "n": 120,
+   "total_ms": 669.071035,
+   "median": 5565.8435,
+   "p10": 5554.003,
+   "p90": 5606.484,
+   "cv": 0.006893012082612004,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.lm_head.weight",
+   "shape": [
+    5120,
+    248320
+   ],
+   "grid": [
+    1,
+    3880,
+    1
+   ]
+  },
+  {
+   "n": 1920,
+   "total_ms": 373.16844699999996,
+   "median": 194.625,
+   "p10": 190.562,
+   "p90": 197.538,
+   "cv": 0.02901410287358449,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.linear_attn.out_proj.weight",
+   "shape": [
+    6144,
+    5120
+   ],
+   "grid": [
+    1,
+    80,
+    1
+   ]
+  },
+  {
+   "n": 320,
+   "total_ms": 249.998854,
+   "median": 779.6555,
+   "p10": 774.247,
+   "p90": 791.655,
+   "cv": 0.00883066811863506,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.mlp.gate_up_proj.weight",
+   "shape": [
+    5120,
+    34816
+   ],
+   "grid": [
+    1,
+    544,
+    1
+   ]
+  },
+  {
+   "n": 640,
+   "total_ms": 209.740147,
+   "median": 327.203,
+   "p10": 321.571,
+   "p90": 332.483,
+   "cv": 0.040277467396257274,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.self_attn.qkv_proj.weight",
+   "shape": [
+    5120,
+    14336
+   ],
+   "grid": [
+    1,
+    224,
+    1
+   ]
+  },
+  {
+   "n": 320,
+   "total_ms": 129.302924,
+   "median": 404.26,
+   "p10": 395.684,
+   "p90": 410.5,
+   "cv": 0.015683807855624878,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.mlp.down_proj.weight",
+   "shape": [
+    17408,
+    5120
+   ],
+   "grid": [
+    1,
+    80,
+    1
+   ]
+  },
+  {
+   "n": 640,
+   "total_ms": 94.24074300000001,
+   "median": 147.3295,
+   "p10": 144.545,
+   "p90": 149.569,
+   "cv": 0.018811860829397974,
+   "name": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10collective13CollectiveMmaINS2_31MainloopSm120TmaWarpSpecializedILi9ELi2ENS6_IJNS5_1CILi1EEESC_SC_EEENS2_37KernelTmaWarpSpecializedPingpongSm120ILi2EEEEENS6_IJNSB_ILi16EEENSB_ILi64EEENSB_ILi128EEEEEENS_12float_e4m3_tENS6_IJlSC_lEEESL_SM_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_16SM120_16x8x32_TNISL_SL_fEEEEENS5_6LayoutINS6_IJNSB_ILi2EEEST_SC_EEENS6_IJSC_ST_NSB_ILi0EEEEEEEENS6_IJSH_NSB_ILi32EEESY_EEEEENS5_13SM90_TMA_LOADENS5_14ComposedLayoutINS5_7SwizzleILi3ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi8EEENSS_INS6_IJNSB_ILi8EEESJ_EEENS6_IJSJ_SC_EEEEEEENS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NEhEEENS5_8identityES11_S1B_S1E_S1F_EENS_8epilogue10collective18CollectiveEpilogueINS1H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSK_NS6_IJSH_SY_EEEvSM_NS_10bfloat16_tESM_NS1H_6fusion15Sm90TreeVisitorINS1O_11Sm90ComputeINS_10multipliesES1N_fLNS_15FloatRoundStyleE2EvEEJNS1O_24Sm90ColOrScalarBroadcastILi0ESK_fNS6_IJSC_SV_SV_EEELi4EEENS1P_INS1Q_IS1R_ffLS1S_2EvEEJNS1O_24Sm90RowOrScalarBroadcastILi0ESK_fNS6_IJSV_SC_SV_EEELi4EEENS1O_12Sm90AccFetchEEEEEEES11_NS12_INS13_ILi2ELi4ELi3EEENS15_ILi16EEENSS_INS6_IJS17_SY_EEENS6_IJSY_SC_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES29_NS5_17SM90_U32x2_STSM_NENS1C_IJS2C_NS_6half_tEEEEvEEEvvEEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.self_attn.o_proj.weight",
+   "shape": [
+    6144,
+    5120
+   ],
+   "grid": [
+    1,
+    80,
+    1
+   ]
+  },
+  {
+   "n": 2240,
+   "total_ms": 973.2126949999999,
+   "median": 433.316,
+   "p10": 428.612,
+   "p90": 438.34,
+   "cv": 0.03417230034046336,
+   "name": "_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_42MainloopSm120TmaWarpSpecializedBlockScaledILi3ELi3ENS5_IJNS4_1CILi1EEESB_SB_EEENS1_51KernelTmaWarpSpecializedCooperativeBlockScaledSm120ILi3EEEEENS5_IJNSA_ILi128EEENSA_ILi32EEENSA_ILi256EEEEEENS5_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS5_IJNS5_IJlSB_lEEENS4_6LayoutINS5_IJNS5_IJNS5_IJSH_NSA_ILi4EEEEEEiEEENS5_IJNS5_IJNSA_ILi16EEESP_EEEiEEENS5_IJSB_iEEEEEENS5_IJSU_NS5_IJNS5_IJNSA_ILi0EEESB_EEENSA_ILi512EEEEEENS5_IJSX_iEEEEEEEEEEESM_S14_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISK_SK_fSL_Li16EEEEEENSO_INS5_IJSP_NSA_ILi2EEESB_EEENS5_IJSB_SP_SX_EEEEENS5_IJSG_NSO_INS5_IJNSA_ILi8EEES1C_S1C_EEENS5_IJSB_SS_S1G_EEEEENSA_ILi64EEEEEEEENS5_IJNS4_13SM90_TMA_LOADES1N_EEENS5_IJNS4_14ComposedLayoutINS4_7SwizzleILi3ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi4EEENSO_INS5_IJS1G_SI_EEENS5_IJSI_SB_EEEEEEENSO_INS5_IJNS5_IJSQ_SB_EEENS5_IJST_SB_SP_EEEEEENS5_IJNS5_IJST_SZ_EEENS5_IJSY_SP_SZ_EEEEEEEEEEENS5_IJNS4_9Copy_AtomIJNS4_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS26_IJNS4_13UniversalCopyISL_SL_EESL_EEEEEENS4_8identityES1O_S25_S2E_S2F_EENS_8epilogue10collective18CollectiveEpilogueINS2H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSJ_NS5_IJS1K_SH_EEEvNS5_IJSB_llEEENS_10bfloat16_tES2N_NS2H_6fusion15FusionCallbacksINS2H_23Sm120TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEENS2P_17LinearCombinationIS2O_fvfLNS_15FloatRoundStyleE2EEESJ_S2M_JEEES1N_NS1P_IS1R_NS1S_ILi16EEENSO_INS5_IJS1K_S1G_EEENS5_IJSB_S1K_EEEEEEENS4_17SM75_U16x4_LDSM_TENS4_14SM90_TMA_STOREES31_NS4_17SM90_U16x4_STSM_TENS26_IJNS4_17SM90_U32x2_STSM_NENS_6half_tEEEEvEEENS1_25StaticPersistentSchedulerEvEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.mlp.gate_up_proj.weight",
+   "shape": [
+    34816,
+    2560
+   ],
+   "grid": [
+    1,
+    48,
+    1
+   ]
+  },
+  {
+   "n": 2240,
+   "total_ms": 523.977471,
+   "median": 233.506,
+   "p10": 229.41,
+   "p90": 237.41,
+   "cv": 0.04401686870276415,
+   "name": "_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_42MainloopSm120TmaWarpSpecializedBlockScaledILi3ELi3ENS5_IJNS4_1CILi1EEESB_SB_EEENS1_51KernelTmaWarpSpecializedCooperativeBlockScaledSm120ILi3EEEEENS5_IJNSA_ILi128EEENSA_ILi32EEENSA_ILi256EEEEEENS5_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS5_IJNS5_IJlSB_lEEENS4_6LayoutINS5_IJNS5_IJNS5_IJSH_NSA_ILi4EEEEEEiEEENS5_IJNS5_IJNSA_ILi16EEESP_EEEiEEENS5_IJSB_iEEEEEENS5_IJSU_NS5_IJNS5_IJNSA_ILi0EEESB_EEENSA_ILi512EEEEEENS5_IJSX_iEEEEEEEEEEESM_S14_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISK_SK_fSL_Li16EEEEEENSO_INS5_IJSP_NSA_ILi2EEESB_EEENS5_IJSB_SP_SX_EEEEENS5_IJSG_NSO_INS5_IJNSA_ILi8EEES1C_S1C_EEENS5_IJSB_SS_S1G_EEEEENSA_ILi64EEEEEEEENS5_IJNS4_13SM90_TMA_LOADES1N_EEENS5_IJNS4_14ComposedLayoutINS4_7SwizzleILi3ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi4EEENSO_INS5_IJS1G_SI_EEENS5_IJSI_SB_EEEEEEENSO_INS5_IJNS5_IJSQ_SB_EEENS5_IJST_SB_SP_EEEEEENS5_IJNS5_IJST_SZ_EEENS5_IJSY_SP_SZ_EEEEEEEEEEENS5_IJNS4_9Copy_AtomIJNS4_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS26_IJNS4_13UniversalCopyISL_SL_EESL_EEEEEENS4_8identityES1O_S25_S2E_S2F_EENS_8epilogue10collective18CollectiveEpilogueINS2H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSJ_NS5_IJS1K_SH_EEEvNS5_IJSB_llEEENS_10bfloat16_tES2N_NS2H_6fusion15FusionCallbacksINS2H_23Sm120TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEENS2P_17LinearCombinationIS2O_fvfLNS_15FloatRoundStyleE2EEESJ_S2M_JEEES1N_NS1P_IS1R_NS1S_ILi16EEENSO_INS5_IJS1K_S1G_EEENS5_IJSB_S1K_EEEEEEENS4_17SM75_U16x4_LDSM_TENS4_14SM90_TMA_STOREES31_NS4_17SM90_U16x4_STSM_TENS26_IJNS4_17SM90_U32x2_STSM_NENS_6half_tEEEEvEEENS1_25StaticPersistentSchedulerEvEEEEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.mlp.down_proj.weight",
+   "shape": [
+    5120,
+    8704
+   ],
+   "grid": [
+    1,
+    40,
+    1
+   ]
+  },
+  {
+   "n": 80,
+   "total_ms": 115.233356,
+   "median": 1434.0774999999999,
+   "p10": 1429.742,
+   "p90": 1446.701,
+   "cv": 0.016672999139883456,
+   "name": "_ZN8internal5gemvx6kernelIii13__nv_bfloat16S2_S2_fLb0ELb1ELb1ELb0ELi7ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+   "weight": "speculator.model.layers.N.mlp.gate_up_proj.weight",
+   "shape": [
+    34816,
+    5120
+   ],
+   "grid": [
+    8704,
+    1,
+    1
+   ]
+  },
+  {
+   "n": 80,
+   "total_ms": 61.408345999999995,
+   "median": 759.1115,
+   "p10": 756.903,
+   "p90": 765.223,
+   "cv": 0.0799875959675674,
+   "name": "_ZN8internal5gemvx6kernelIii13__nv_bfloat16S2_S2_fLb0ELb1ELb1ELb0ELi7ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+   "weight": "speculator.model.layers.N.mlp.down_proj.weight",
+   "shape": [
+    5120,
+    17408
+   ],
+   "grid": [
+    1280,
+    1,
+    1
+   ]
+  },
+  {
+   "n": 80,
+   "total_ms": 48.097949,
+   "median": 593.8140000000001,
+   "p10": 591.205,
+   "p90": 602.438,
+   "cv": 0.05811437617991102,
+   "name": "_ZN8internal5gemvx6kernelIii13__nv_bfloat16S2_S2_fLb0ELb1ELb1ELb0ELi7ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+   "weight": "speculator.model.layers.N.self_attn.qkv_proj.weight",
+   "shape": [
+    14336,
+    5120
+   ],
+   "grid": [
+    3584,
+    1,
+    1
+   ]
+  },
+  {
+   "n": 80,
+   "total_ms": 36.141935,
+   "median": 449.332,
+   "p10": 447.108,
+   "p90": 455.269,
+   "cv": 0.026935921693340525,
+   "name": "_ZN8internal5gemvx6kernelIii13__nv_bfloat16S2_S2_fLb0ELb1ELb1ELb0ELi7ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+   "weight": "speculator.model.fc.weight",
+   "shape": [
+    5120,
+    10240
+   ],
+   "grid": [
+    1280,
+    1,
+    1
+   ]
+  },
+  {
+   "n": 80,
+   "total_ms": 20.324248,
+   "median": 252.674,
+   "p10": 251.138,
+   "p90": 256.29,
+   "cv": 0.025195929718736774,
+   "name": "_ZN8internal5gemvx6kernelIii13__nv_bfloat16S2_S2_fLb0ELb1ELb1ELb0ELi7ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+   "weight": "speculator.model.layers.N.self_attn.o_proj.weight",
+   "shape": [
+    5120,
+    6144
+   ],
+   "grid": [
+    1280,
+    1,
+    1
+   ]
+  },
+  {
+   "n": 1920,
+   "total_ms": 68.50061500000001,
+   "median": 36.576,
+   "p10": 32.865,
+   "p90": 37.472,
+   "cv": 0.15595565996563931,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8EEvNT_6ParamsE",
+   "weight": "language_model.model.layers.N.linear_attn.in_proj_ba.weight",
+   "shape": [
+    96,
+    5120
+   ],
+   "grid": [
+    8,
+    1,
+    1
+   ]
+  },
+  {
+   "n": 40,
+   "total_ms": 31.937445,
+   "median": 797.3195,
+   "p10": 792.903,
+   "p90": 803.752,
+   "cv": 0.010996673204383104,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8EEvNT_6ParamsE",
+   "weight": "speculator.model.layers.N.mlp.down_proj.weight",
+   "shape": [
+    5120,
+    17408
+   ],
+   "grid": [
+    8,
+    40,
+    1
+   ]
+  },
+  {
+   "n": 40,
+   "total_ms": 18.763921999999997,
+   "median": 468.1485,
+   "p10": 466.277,
+   "p90": 471.909,
+   "cv": 0.008822220381411188,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8EEvNT_6ParamsE",
+   "weight": "speculator.model.fc.weight",
+   "shape": [
+    5120,
+    10240
+   ],
+   "grid": [
+    8,
+    40,
+    1
+   ]
+  },
+  {
+   "n": 40,
+   "total_ms": 11.589705,
+   "median": 289.1545,
+   "p10": 287.298,
+   "p90": 293.059,
+   "cv": 0.009561592519636225,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8EEvNT_6ParamsE",
+   "weight": "speculator.model.layers.N.self_attn.o_proj.weight",
+   "shape": [
+    5120,
+    6144
+   ],
+   "grid": [
+    8,
+    40,
+    1
+   ]
+  },
+  {
+   "n": 40,
+   "total_ms": 62.049021999999994,
+   "median": 1540.382,
+   "p10": 1534.159,
+   "p90": 1552.303,
+   "cv": 0.03353231690982674,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8EEvNT_6ParamsE",
+   "weight": "speculator.model.layers.N.mlp.gate_up_proj.weight",
+   "shape": [
+    34816,
+    5120
+   ],
+   "grid": [
+    8,
+    272,
+    1
+   ]
+  },
+  {
+   "n": 40,
+   "total_ms": 26.259253,
+   "median": 654.918,
+   "p10": 650.47,
+   "p90": 661.926,
+   "cv": 0.016487109134036393,
+   "name": "_ZN7cutlass7Kernel2I68cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8EEvNT_6ParamsE",
+   "weight": "speculator.model.layers.N.self_attn.qkv_proj.weight",
+   "shape": [
+    14336,
+    5120
+   ],
+   "grid": [
+    8,
+    112,
+    1
+   ]
+  },
+  {
+   "n": 1920,
+   "total_ms": 76.197185,
+   "median": 38.88,
+   "p10": 36.384,
+   "p90": 44.097,
+   "cv": 0.09005099486065192,
+   "name": "_ZN59_GLOBAL__N__0b960a40_26_fused_gdn_decode_kernel_cu_315660c331gdn_decode_post_conv_mtp_kernelIfLi3ELb0EEEvPK13__nv_bfloat16S3_S3_PKfPKvPKiS9_S9_PT_S3_S7_PS1_iiiibffNS_16GdnDecodeStridesE",
+   "weight": "language_model.model.layers.N.linear_attn.norm.weight",
+   "shape": [
+    128
+   ],
+   "grid": [
+    1,
+    48,
+    1
+   ]
+  },
+  {
+   "n": 2520,
+   "total_ms": 14.97107,
+   "median": 5.44,
+   "p10": 5.28,
+   "p90": 7.361,
+   "cv": 0.16193092701780712,
+   "name": "triton_red_fused__to_copy_abs_add_clamp_cutlass_scaled_mm_div_fused_add_rms_norm_max_mul_reciprocal_unsqueeze_3",
+   "weight": "language_model.model.layers.N.input_layernorm.weight",
+   "shape": [
+    5120
+   ],
+   "grid": [
+    4,
+    1,
+    1
+   ]
+  }
+ ]
+}

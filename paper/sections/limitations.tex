@@ -1,0 +1,65 @@
+\section{Limitations and Future Work}\label{sec:limits}
+
+\sys{} is intentionally lightweight and non-invasive, which brings concrete boundaries that
+we state explicitly below.
+
+\paragraph{Decode-centric byte model.}
+\sys{} estimates each weight-streaming launch's traffic as a single read of its referenced
+weight tensor (plus same-module scale tensors), ignoring activation and cache traffic.
+This approximation holds for low-batch decode, where weights dominate memory movement,
+and it successfully flags launches whose effective bandwidth falls below the measured
+ceiling.
+It does not apply to prefill or large-batch decode, where activations and compute dominate,
+nor does it directly measure the write traffic of non-weight kernels---in our case study,
+\sys{} localized the anomaly to GDN \texttt{out\_proj} and identified the preceding GDN
+decode kernel, while the exact write volume and dirty-L2 mechanism were established by
+controlled isolation experiments and kernel inspection.
+
+\paragraph{Pointer-scanning attribution and opaque launches.}
+Parameter resolution scans 8-byte words in captured kernel argument buffers for addresses
+falling within the exported memory map.
+Kernels that receive tensor addresses indirectly---for example, through device-side pointer
+arrays or indirection tables---cannot be attributed to specific weights.
+For direct runtime-API launches, \sys{} resolves parameter layouts either through the
+application's loaded \texttt{cudart} or via a by-name fallback table populated from both
+instantiated CUDA graph nodes and direct launches that expose a \texttt{CUfunction} handle.
+However, some runtime launches arrive at the CUPTI callback with neither a function handle
+nor a symbol name, and neither the cudart lookup nor \texttt{dladdr} on the host stub
+resolves them, so neither path applies. We suspect a cudart other than the one \sys{} queries
+(for example, a statically linked copy), but have not confirmed the cause.
+In our batch-1 GB10 window (38,880 launches across 40 steps, or 972 per step), all 927
+graph kernel nodes per step resolve, while 22 of the 45 direct launches per step (880 in
+the window) carry no parameters (\cref{sec:coverage}).
+One of those 22 is a draft-step \texttt{lm\_head} launch of the same CUTLASS kernel that
+already appears in the captured graphs; its layout is known, and it is dropped only because
+its name is absent at launch time.
+
+\paragraph{Experimental scope and methodology.}
+Our evaluation covers one hardware architecture (NVIDIA GB10, \texttt{sm\_121}), one model
+family (Qwen3.8-27B NVFP4 with \texttt{qwen3\_5\_mtp}, $k{=}3$), and one serving engine
+(vLLM 0.31.0, 0.34.0, and \texttt{main}).
+Because GB10 sits at its software power cap, whole-step wall-clock drift is comparable to
+the batch-1 effect size, making per-kernel and GPU-busy measurements essential for
+batch-1 comparisons.
+We also note two caveats in the case study itself: first, two runs fell back from CUDA
+graphs to eager execution and were excluded---the second batch-1 run of the last-position-only probe and one
+unmodified batch-4 baseline run. We did not determine the cause; since an unmodified run fell
+back as well, we do not attribute it to the probe's corrupted state; second, our deferred-store
+CUDA kernel inherits the assumption of upstream vLLM PR~\#61434 that a request with
+recorded speculative inputs will replay them on a subsequent speculative step, leaving a
+transition to non-speculative decode untested.
+Finally, in the interest of accurate provenance, the dirty-L2 mechanism on GB10 was first
+diagnosed manually through trace inspection and isolated benchmarks; \sys{} was built
+afterward to systematize the workflow and automatically reproduces the finding without
+manual intervention.
+
+\paragraph{Future work.}
+Two extensions would remove the main manual steps in our current workflow.
+First, pairing \sys{} with per-launch read and write sets collected via dynamic binary
+instrumentation such as NVBit~\cite{villa2019nvbit} would quantify dirty write volumes
+directly and detect dead writes---addresses written by one launch and overwritten before any
+subsequent launch reads them---without model-specific knowledge.
+Second, extending the accounting model to multi-GPU serving would track collective
+communication launches (such as AllReduce and AllGather) alongside weight streams and cache
+traffic, enabling the same invariant-based attribution on tensor- and pipeline-parallel
+deployments.

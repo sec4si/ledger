@@ -1,0 +1,10 @@
+\section{Conclusion}\label{sec:conclusion}
+
+A decode step is a few hundred weight reads in a row, and each one has a price set by the
+bandwidth ceiling. Keeping the books per launch, rather than per kernel name, turns ``this GEMM is
+slow'' into a narrower and more useful statement: this GEMM is slow on these weights, only after
+that kernel. \sys{} produces such statements from an unmodified engine at 0.3\% overhead. They
+are leads, not explanations; on DGX Spark it took isolation runs, hardware counters and a kernel
+probe to show that the lead was a recurrent-state write-back, and a deferred-store fix to buy back
+5.2--7.5\% of serving throughput. \sys{} and all case-study data and scripts are available at
+\url{https://github.com/sec4si/ledger}.

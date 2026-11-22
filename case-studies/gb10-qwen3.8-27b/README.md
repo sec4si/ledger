@@ -50,8 +50,8 @@ Most weight-streaming launches run at 85 to 96% of the ceiling. Two items stand 
 
 - **`lm_head` is read four times per step.** The main model reads it once and each of the three
   MTP draft steps reads the full 248k-vocabulary head again: 5.1 GB, about 18% of the step. (Ledger
-  attributes three of the four reads; one launch goes through a statically linked cudart whose
-  parameters it cannot see.)
+  attributes three of the four reads; one launch reaches the capture library without a
+  function handle or name, so its parameters cannot be decoded.)
 - **GDN `out_proj` runs at 64%**, far below its neighbours. Section 4.
 
 ## 4. Same kernel, same shape, different speed
@@ -129,7 +129,8 @@ per layer, twice the L2, and the GDN kernel itself stalls on DRAM writes. The st
 with the batch while weight traffic does not, so the saving grows with load. (At batch 1 the
 kernel-level saving is 2.4 ms per step but the step only gained 1.2 to 1.4 ms: in that run the
 MLP gate_up GEMMs were 4% slower in every layer, GDN or not, consistent with power-cap drift. A
-fourth batch-1 run fell back to eager execution after the corrupted state and is excluded.)
+fourth batch-1 run fell back to eager execution and is excluded; the cause is unknown, and an
+unmodified baseline run did the same.)
 
 ## 6. Deferring the stores
 
@@ -145,7 +146,7 @@ Alternating runs at 2000 MHz, GPU busy time per step:
 
 | batch | per-token stores | deferred | saving | GDN kernel |
 |---|---|---|---|---|
-| 1 | 120.90 / 121.04 ms | 118.71 / 119.10 ms | 2.1 ms (1.8%) | 40.7 -> 27.4 us |
+| 1 | 120.90 / 121.04 ms | 118.71 / 119.10 ms | 2.1 ms (1.7%) | 40.7 -> 27.4 us |
 | 4 | 132.27 ms | 123.50 / 123.72 ms | 8.7 ms (6.5%) | 270 -> 97 us |
 
 The replay costs about 4 us per GDN launch at batch 1 over the store-last-only probe. One batch-4
