@@ -103,9 +103,7 @@ the time they run alone (a launch on a parallel graph branch costs the step less
 and, given measured peaks (`python bench/flops.py`), each weight-streaming launch against both
 ceilings: bytes at the bandwidth ceiling and FLOPs at the peak of its precision. FLOPs take M from
 `run.json` (prefill tokens, or batch times one plus the draft tokens), which fits vLLM's layout. With
-`--prefill N`, `examples/vllm_decode.py` times one step that prefills an N-token prompt; give vLLM a
-CUDA graph of that size (`--compilation-config '{"cudagraph_capture_sizes": [..., N]}'`), since eager
-prefill GEMMs often reach the capture library without parameters.
+`--prefill N`, `examples/vllm_decode.py` times one step that prefills an N-token prompt.
 
 Per step (`examples/vllm_decode.py` puts a marker kernel at the start of each step and writes
 `steps.jsonl`: host time, tokens per request, SM clock, power and temperature):
@@ -174,10 +172,16 @@ Nsight Compute profile to compare what each launch needed with what it pulled fr
   prefill or large batches.
 - Pointers are found by scanning parameter bytes for addresses inside known regions. Kernels that
   take pointers indirectly (pointer arrays in device memory) are invisible to it.
-- Some runtime-API launches reach the callback with neither a function handle nor a symbol name,
-  and neither `cudaGetFuncBySymbol` nor `dladdr` on the host stub resolves them, so their
-  parameters cannot be decoded (we suspect a statically linked cudart; not confirmed). In the GB10
-  case 14 of the 45 eager launches per step stay opaque, all small PyTorch kernels.
+- A runtime that loads modules context-independently launches through the driver with a `CUkernel`
+  in the function slot; the capture library resolves it to the context's function. Launches it
+  still cannot name carry no parameters; on GB10 with vLLM 0.34 there were none, in decode or in an
+  eager 2048-token prefill.
+- Idle time between and inside steps is the engine's as configured: with
+  `--no-async-scheduling` (used for the case studies, to keep steps apart) host work shows up as GPU
+  idle that the default asynchronous scheduler hides (Qwen3-30B batch 1: 25.3 against 22.9 ms per
+  step, the same GPU busy time).
+- NVML power readings on GB10 are not usable as GPU power (a few watts under full load); the SM
+  clock and temperature are.
 - Tested on NVIDIA GB10 (sm_121) with vLLM 0.31 and 0.34.
 - Copy addresses are decoded for linear copies (`cudaMemcpy[Async]`, `cuMemcpy[Async]`,
   `cuMemcpy{HtoD,DtoH,DtoD}[Async]` and their per-thread-stream variants) and for memcpy nodes of

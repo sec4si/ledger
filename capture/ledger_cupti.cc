@@ -108,9 +108,24 @@ std::mutex g_layout_mu;
 std::unordered_map<CUfunction, Layout> g_func_layouts;
 std::unordered_map<std::string, NamedLayout> g_name_layouts;
 
-const Layout* layout_of(CUfunction f, const char** name) {
+// A runtime that loads modules context-independently (cudaLibrary) launches through the driver with
+// a CUkernel handle in the CUfunction slot; the function APIs reject it. Resolve it to the context's
+// CUfunction first, as the graph nodes do.
+CUfunction function_of(CUfunction f, const char** name) {
+  if (cuFuncGetName(name, f) == CUDA_SUCCESS && *name) return f;
+  CUfunction g = nullptr;
+  if (cuKernelGetFunction(&g, reinterpret_cast<CUkernel>(f)) == CUDA_SUCCESS && g &&
+      cuFuncGetName(name, g) == CUDA_SUCCESS && *name)
+    return g;
   *name = nullptr;
-  if (!f || cuFuncGetName(name, f) != CUDA_SUCCESS || !*name) return nullptr;
+  return nullptr;
+}
+
+const Layout* layout_of(CUfunction handle, const char** name) {
+  *name = nullptr;
+  if (!handle) return nullptr;
+  CUfunction f = function_of(handle, name);
+  if (!f) return nullptr;
   std::lock_guard<std::mutex> lock(g_layout_mu);
   auto it = g_func_layouts.find(f);
   if (it != g_func_layouts.end()) return &it->second;
