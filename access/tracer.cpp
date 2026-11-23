@@ -17,7 +17,8 @@
 //                           launches; for programs that run graphs node by node
 //   LEDGER_ACCESS_PATCHES   path of patches.fatbin
 //   LEDGER_ACCESS_SKIP      text file, one "<begin> <end>" decimal byte range per line; or "auto": when the
-//                           window opens, skip the weights listed in LEDGER_OUT/regions-<pid>.json
+//                           window opens, skip the weights listed in LEDGER_OUT/regions-<pid>.json, except
+//                           those whose name contains LEDGER_ACCESS_TRACE_WEIGHTS (e.g. MoE "experts")
 //   LEDGER_ACCESS_GRANULE   log2 of the granule size in bytes (default 10, at least 5)
 //   LEDGER_ACCESS_SLOTS     log2 of the granule table size (default 22)
 //   LEDGER_ACCESS_EVENTS    event log capacity (default 8388608)
@@ -151,7 +152,8 @@ std::vector<unsigned long long> read_ranges(const char* path) {
 }
 
 // Weights of a Ledger regions file (a JSON list of flat objects with "kind", "addr" and "size").
-std::vector<unsigned long long> read_weight_regions(const std::string& path) {
+// Weights whose name contains `keep` (LEDGER_ACCESS_TRACE_WEIGHTS, e.g. "experts") stay traced.
+std::vector<unsigned long long> read_weight_regions(const std::string& path, const std::string& keep) {
   std::ifstream in(path);
   std::string text((std::istreambuf_iterator<char>(in)), {});
   std::vector<std::pair<unsigned long long, unsigned long long>> r;
@@ -164,6 +166,7 @@ std::vector<unsigned long long> read_weight_regions(const std::string& path) {
     if (end == std::string::npos) break;
     const std::string obj = text.substr(start, end - start);
     if (obj.find("\"kind\": \"weight\"") == std::string::npos) continue;
+    if (!keep.empty() && obj.find(keep) != std::string::npos) continue;
     const unsigned long long addr = number(obj, "\"addr\": "), size = number(obj, "\"size\": ");
     if (addr && size) r.emplace_back(addr, addr + size);
   }
@@ -196,7 +199,8 @@ bool prepare(CUcontext ctx, Sanitizer_StreamHandle stream) {
   if (s.ready) return true;
   s.ctx = ctx;
   if (s.skip_auto) {
-    s.skip_ranges = read_weight_regions(s.out + "/regions-" + std::to_string(getpid()) + ".json");
+    const char* keep = getenv("LEDGER_ACCESS_TRACE_WEIGHTS");
+    s.skip_ranges = read_weight_regions(s.out + "/regions-" + std::to_string(getpid()) + ".json", keep ? keep : "");
     fprintf(stderr, "ledger-access: pid %d skips %zu weight ranges from its regions file\n", getpid(),
             s.skip_ranges.size() / 2);
   }

@@ -13,7 +13,12 @@ A launch pulling far more than it needs re-reads data that fell out of the L2, o
 one pulling about what it needs but running slow is limited by something other than memory; one pulling
 less than it needs found its inputs still in the L2, written there by the launch before it.
 
-    python -m ledger.traffic <access dir> <launches file> <profile.csv> --regions <regions json> [--out report.md]
+    python -m ledger.traffic <access dir> <launches file | -> <profile.csv> --regions <regions json>
+        [--anchor <kernel>] [--traced-weights <name part>] [--out report.md]
+
+With "-" for the launches file the step is the second full anchor-to-anchor span of the trace. Weights
+whose name contains --traced-weights were traced (LEDGER_ACCESS_TRACE_WEIGHTS) and count as what was
+actually read, not as the whole tensor.
 """
 
 import argparse
@@ -43,13 +48,21 @@ def main():
     ap.add_argument("profile")
     ap.add_argument("--regions", required=True)
     ap.add_argument("--ceiling-gbps", type=float, default=252, help="read bandwidth ceiling, as in the main report")
+    ap.add_argument("--anchor", help="first kernel of a step, when no launches file is given")
+    ap.add_argument("--traced-weights", default="", help="name part of weights the trace covers")
     ap.add_argument("--out")
     args = ap.parse_args()
 
     meta, shift, lid, kind, gran, mask, _pcs = load_access(args.access)
     kernels = [m for m in meta if m["name"] not in ("memcpy", "memset")]
     names = [m["name"] for m in kernels]
-    step = [line.strip() for line in open(args.launches) if line.strip()]
+    if args.launches == "-":
+        at = [i for i, n in enumerate(names) if n == args.anchor]
+        if len(at) < 3:
+            raise SystemExit("need three anchor launches in the trace")
+        step = names[at[1] : at[2]]
+    else:
+        step = [line.strip() for line in open(args.launches) if line.strip()]
     start = next((i for i in range(len(names) - len(step) + 1) if names[i : i + len(step)] == step), None)
     if start is None:
         raise SystemExit("the step does not appear in the trace")
@@ -76,7 +89,8 @@ def main():
     def weight_bytes(i):
         params = by_id[i].get("params") or []
         hits = mem.touched(params)
-        weights = [j for j in hits if mem.regions[j]["kind"] == "weight"]
+        weights = [j for j in hits if mem.regions[j]["kind"] == "weight"
+                   and not (args.traced_weights and args.traced_weights in mem.regions[j]["name"])]
         exact = [j for j in weights if hits[j]] or weights
         if not exact:
             return 0
