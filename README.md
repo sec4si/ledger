@@ -12,7 +12,10 @@ Name-level totals average all of that away. Ledger keeps the books per launch in
 - it resolves each launch's pointer arguments against the memory map, so every launch knows which
   weight it streamed and which caches it touched;
 - it compares each launch with the measured bandwidth ceiling and flags launches that should
-  behave the same but do not.
+  behave the same but do not;
+- it traces which device memory each launch read and wrote, and follows data from writer to
+  reader: bytes written and overwritten unread, hand-offs between neighbours, and, by poisoning
+  writes in a replay, which of them the output actually depends on.
 
 Ledger is part of the [sec4si](https://sec4.si) research ecosystem.
 
@@ -39,6 +42,13 @@ vLLM picks DeepGEMM for block FP8 MoE on SM12x; its Triton backend is faster the
 throughput at concurrency 1-8 with unchanged GSM8K accuracy. The change is proposed as
 [vllm-project/vllm#69355](https://github.com/vllm-project/vllm/pull/69355); the case study is in
 [`case-studies/gb10-qwen3-30b-a3b`](case-studies/gb10-qwen3-30b-a3b).
+
+The access trace of the Qwen3.8 step finds 460 MB of its 712 MB of writes per step dead, but only
+3.4 MB of that can simply be dropped: the GDN states are dead in every step, yet which of the four
+depends on how many drafts were accepted, which is why the fix defers them rather than dropping them
+([`dataflow.md`](case-studies/gb10-qwen3.8-27b/dataflow.md)). The books also put the three draft
+reads of `lm_head` at 16.8 ms per step; drafting over the first 32,768 token ids in a replay saved
+14.3 ms with unchanged greedy output (section 9 of the case study).
 
 ## Use
 
@@ -98,6 +108,33 @@ compares bandwidth with the host-to-device ceilings that `bwtest` also prints:
 python -m ledger.transfers out --h2d-gbps <measured> --d2h-gbps <measured> --out transfers.md
 ```
 
+## Who read and wrote what
+
+The access tracer (`access/`, Compute Sanitizer API) records, per launch inside the window, the
+device memory it read and wrote at 32-byte resolution, with the PC of each access and the byte
+ranges of copies and fills. It runs CUDA graphs node by node itself, and reads the tensor maps
+among a launch's parameters, so TMA kernels are covered too. See [`access/README.md`](access/README.md)
+for the build, the environment variables and the self-tests.
+
+```sh
+make -C access CUDA=/usr/local/cuda ARCH=<sm>
+LD_PRELOAD=$PWD/access/libledger_access.so LEDGER_ACCESS_PATCHES=$PWD/access/patches.fatbin \
+  LEDGER_OUT=acc LEDGER_ACCESS_SKIP=auto <program>          # window: the profiling range, as above
+python -m ledger.dataflow acc --anchor <first kernel of a step> [--cubins <dir>] [--masks-out m.npz]
+python -m ledger.dead_across acc*/m.npz                     # several traces: droppable or input-dependent
+python -m ledger.sass <cubin dir> <function> <offset>       # the instruction behind a dead store
+```
+
+`ledger.dataflow` reports dead writes (by kernel, instruction and region), launches whose every
+write is dead, hand-offs to the next launch only, constant inputs and independent neighbours.
+`ledger.dead_across` splits dead writes over several traces into the same bytes dead every step,
+as much dead every step but different bytes, and dead in some steps only.
+
+Value experiments need a replay that can poison memory right after a given launch (Sibyl's
+`replay_perturb`): `ledger.perturb_plan` turns a trace into experiments, one per tensor a launch
+wrote, and `ledger.perturb_report` reads the results back. `ledger.traffic` joins a trace with an
+Nsight Compute profile to compare what each launch needed with what it pulled from memory.
+
 ## Limits
 
 - Byte counts take each referenced weight as read once per launch and ignore activations and
@@ -110,10 +147,18 @@ python -m ledger.transfers out --h2d-gbps <measured> --d2h-gbps <measured> --out
   parameters cannot be decoded (we suspect a statically linked cudart; not confirmed). In the GB10
   case 14 of the 45 eager launches per step stay opaque, all small PyTorch kernels.
 - Tested on NVIDIA GB10 (sm_121) with vLLM 0.31 and 0.34.
-
 - Copy addresses are decoded for linear copies (`cudaMemcpy[Async]`, `cuMemcpy[Async]`,
   `cuMemcpy{HtoD,DtoH,DtoD}[Async]` and their per-thread-stream variants) and for memcpy nodes of
   graphs. 2D/3D, peer and symbol copies are timed and counted but not attributed to a region.
+
+- The access tracer finds what a tensor-map launch wrote by comparing its tensors before and after
+  it (a write of the value already there does not show) and takes it to read every tensor its maps
+  span; maps encoded for more rows than their tensor holds (DeepGEMM's) then read too much, which
+  can hide dead writes but not invent them. Maps kept in device memory are not found. The tracer
+  slows a program down by about two orders of magnitude (not measured systematically).
+- Dead writes are found for the inputs traced; a value experiment's verdict holds for the steps it
+  compares (24 steps changed it for 0.3% of the bytes judged unused over 3) and was not reproducible
+  for about 1 MB of 476 MB.
 
 ## Next
 
