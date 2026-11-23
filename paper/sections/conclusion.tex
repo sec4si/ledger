@@ -5,6 +5,8 @@ bandwidth ceiling. Keeping the books per launch, rather than per kernel name, tu
 slow'' into a narrower and more useful statement: this GEMM is slow on these weights, only after
 that kernel. \sys{} produces such statements from an unmodified engine at 0.3\% overhead. They
 are leads, not explanations; on DGX Spark it took isolation runs, hardware counters and a kernel
-probe to show that the lead was a recurrent-state write-back, and a deferred-store fix to buy back 5.2--7.5\% of serving throughput. On a
+probe to show that the lead was a recurrent-state write-back, and a deferred-store fix to buy back 5.2--7.5\% of serving throughput. The same
+books priced the draft steps' repeated vocabulary reads at 16.8\,ms per step, and a smaller draft
+head recovered 14.3\,ms of it in a replay. On a
 mixture-of-experts model the same books, with the access tracer and L2 fill counters, found almost no bytes to remove and a slow kernel instead, and a backend change bought back 18--44\%. \sys{} and all case-study data and scripts are available at
 \url{https://github.com/sec4si/ledger}.

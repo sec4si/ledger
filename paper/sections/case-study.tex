@@ -215,6 +215,41 @@ GSM8K, 200 questions, greedy & 0.975 & 0.975 & \\
 \caption{vLLM main with the deferred-store change, with deferral turned off by a local switch (per-token stores) and on (deferred).}\label{tab:upstream}
 \end{table}
 
+\subsection{A prediction from the books: smaller draft heads}\label{sec:drafthead}
+
+The books also price the repeated \texttt{lm\_head} reads: each draft step streams the full
+248k-vocabulary head, 5.6\,ms, 16.8\,ms per step for the three. Drafts only propose tokens and the
+main model checks them, so a draft head over part of the vocabulary can cost acceptance but never
+correctness. We tried this in a replay of the vLLM recording (the same kernels at the same
+addresses), replacing the drafts' \texttt{lm\_head} GEMM with an FP8 GEMV over the first 32\,768
+token ids and filling the other columns with $-\infty$. This change exists only in the replay; it
+is not part of vLLM.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & full vocabulary & first 32\,768 ids \\
+\midrule
+Step (median) & 120.4\,ms & 106.1\,ms \\
+Greedy: tokens per step & 2.84 & 2.73 \\
+Greedy: tokens/s & 23.6 & 25.7 ($+9\%$) \\
+Sampled (3 seeds, $T$ 0.2 and 0.9): tokens per step & 2.51 & 2.49 \\
+Sampled: tokens/s & 20.7 & 23.4 ($+13\%$) \\
+\bottomrule
+\end{tabular}
+\caption{Draft heads over the full vocabulary and over its first 32\,768 ids, in the replay; batch 1, 200 tokens per request, one English prompt. Greedy output is identical.}\label{tab:drafthead}
+\end{table}
+
+The step lost 14.3 of the 16.8\,ms the books predicted; the rest is the GEMV and the $-\infty$
+fill (\cref{tab:drafthead}). Greedy output is identical, as it must be, and acceptance drops a
+little where the best draft lies outside the first 32\,768 ids, for a net gain of 9\% in greedy and
+13\% in sampled decoding. Choosing the rows by token frequency in GSM8K, Python sources and English
+documentation did no better. The measurement covers one English prompt at batch 1; the low ids
+are mostly English pieces, so other languages may lose more acceptance, and larger batches were
+not measured. vLLM's EAGLE-3 drafts already map a small draft vocabulary onto the target's; the
+MTP drafts share the full head.
+
 \subsection{What \sys{} reports}
 
 Run on the unmodified engine, \sys{} produces the out\_proj/o\_proj split with its 2.27\,ms per
