@@ -180,7 +180,66 @@
   eprint  = {2609.11938}
 }
 
+@inproceedings{chabbi2012deadspy,
+  author    = {Chabbi, Milind and Mellor-Crummey, John},
+  title     = {{DeadSpy}: A Tool to Pinpoint Program Inefficiencies},
+  booktitle = {Proceedings of the Tenth International Symposium on Code Generation and Optimization (CGO)},
+  pages     = {124--134},
+  year      = {2012},
+  doi       = {10.1145/2259016.2259033}
+}
+
+@inproceedings{wen2017redspy,
+  author    = {Wen, Shasha and Chabbi, Milind and Liu, Xu},
+  title     = {{REDSPY}: Exploring Value Locality in Software},
+  booktitle = {Proceedings of the Twenty-Second International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  pages     = {47--61},
+  year      = {2017},
+  doi       = {10.1145/3037697.3037729}
+}
+
+@inproceedings{zhou2020gvprof,
+  author    = {Zhou, Keren and Hao, Yueming and Mellor-Crummey, John and Meng, Xiaozhu and Liu, Xu},
+  title     = {{GVProf}: A Value Profiler for {GPU}-Based Clusters},
+  booktitle = {International Conference for High Performance Computing, Networking, Storage and Analysis (SC)},
+  pages     = {1--16},
+  year      = {2020},
+  doi       = {10.1109/SC41405.2020.00093}
+}
+
+@inproceedings{zhou2022valueexpert,
+  author    = {Zhou, Keren and Hao, Yueming and Mellor-Crummey, John and Meng, Xiaozhu and Liu, Xu},
+  title     = {{ValueExpert}: Exploring Value Patterns in {GPU}-Accelerated Applications},
+  booktitle = {Proceedings of the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  pages     = {171--185},
+  year      = {2022},
+  doi       = {10.1145/3503222.3507708}
+}
+
+@inproceedings{zhao2025redsan,
+  author    = {Zhao, Yanbo and Hao, Yueming and Li, Zecheng and Jiao, Shuyin and Liu, Xu and Li, Jiajia},
+  title     = {{RedSan}: A Redundant Memory Instruction Sanitizer for {GPU} Programs},
+  booktitle = {International Conference for High Performance Computing, Networking, Storage and Analysis (SC)},
+  pages     = {368--382},
+  year      = {2025},
+  doi       = {10.1145/3712285.3759830}
+}
+
+@inproceedings{ding2026tenprof,
+  author    = {Ding, Xingjian and Zhou, Keren and Hao, Yueming and Su, Pengfei},
+  title     = {{TenProf}: A Tensor-Centric Profiler for Deep Learning Workload Analysis and Optimization},
+  booktitle = {International Conference on Supercomputing (ICS)},
+  pages     = {201--214},
+  year      = {2026},
+  doi       = {10.1145/3797905.3800515}
+}
+
 % Documentation, software, and upstream changes are cited by their primary URLs.
+@misc{nvidiaSanitizerApi,
+  author       = {{NVIDIA}},
+  title        = {{Compute Sanitizer} {API} Reference Manual},
+  howpublished = {\href{https://docs.nvidia.com/compute-sanitizer/SanitizerApiGuide/}{Online documentation}}
+}
 @misc{nvidiaNsightSystems,
   author       = {{NVIDIA}},
   title        = {{Nsight Systems} Post-Collection Analysis Guide},
@@ -263,4 +322,13 @@
   year         = {2026},
   url          = {https://github.com/vllm-project/vllm/pull/69160},
   note         = {\url{https://github.com/vllm-project/vllm/pull/69160}}
+}
+
+@misc{vllmpr69355,
+  author       = {{ZacharyZcR}},
+  title        = {{[Perf][MoE]} Prefer {Triton} for block {FP8} {MoE} on {SM12x} with {TP}},
+  howpublished = {vLLM pull request \#69355},
+  year         = {2026},
+  url          = {https://github.com/vllm-project/vllm/pull/69355},
+  note         = {\url{https://github.com/vllm-project/vllm/pull/69355}}
 }

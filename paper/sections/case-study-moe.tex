@@ -1,0 +1,77 @@
+\section{Case Study: Qwen3-30B-A3B on DGX Spark}\label{sec:case2}
+
+The second case is a mixture-of-experts model on the same machine, chosen because its decode step
+looks nothing like the first: 48 layers, 128 experts of which 8 are routed per token, block FP8
+weights ($128\times128$ scales), vLLM 0.34.0, no speculation. Here the books found no waste to
+remove; what they did find is where the time goes, and that led to a different kind of fix.
+Data and scripts are in \texttt{case-studies/gb10-qwen3-30b-a3b}.
+
+\paragraph{Nothing is written for nothing.}
+The access tracer, with weights skipped, finds that a batch-1 eager decode step writes 47.0\,MB of
+non-weight memory, of which 0.4\,MB is overwritten before anyone reads it; at batch 4, 190.8 and
+1.5\,MB. What little is dead comes from the kernel that lays tokens out per expert for the grouped
+GEMM. Traced with CUDA graphs on (1\,169 launches per step, all seen, 96\% with parameters) the step
+writes 78.9\,MB, 0.3\,MB of it dead. In the graph trace the DeepGEMM kernels, which move their
+operands through tensor maps and encode their activation maps for 4\,096 rows, are taken to read up
+to the end of the allocation segment each map starts in, which hides the scatter kernel's dead
+bytes; the eager trace is the more precise one here.
+
+\paragraph{The experts are read exactly, but slowly.}
+Because the expert weights move through tensor maps, the tracer cannot say which experts a step
+reads. An Nsight Compute profile of the same eager step can say how much each launch pulled from
+memory into L2 (\cref{tab:moe-traffic}). Each layer's grouped GEMMs pull 2--6\% more than the eight
+routed experts' weights, so routing costs little extra traffic. They run at 60--66\% of
+the ceiling, while the dense FP8 GEMMs of the first case reach 85--91\%; the bytes are right and
+the kernel is slow. The step pulls 3.49\,GB, 13.8\,ms at the ceiling, against 30\,ms of GPU time
+in eager mode; the expert GEMMs lose about 4\,ms of it and \texttt{lm\_head} 1.6\,ms.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Launch & per layer & pulled & needed & time & of ceiling \\
+\midrule
+Grouped GEMM, gate and up & 1 & 26.8\,MB & 25.2\,MB & 160\,\textmu s & 66\% \\
+Grouped GEMM, down & 1 & 12.8\,MB & 12.6\,MB & 84\,\textmu s & 60\% \\
+\texttt{lm\_head} ($151936\times2048$ BF16) & 1 per step & 633\,MB & 622\,MB & 4.1\,ms & 61\% \\
+\bottomrule
+\end{tabular}
+\caption{Bytes pulled into L2 (Nsight Compute, \texttt{lts\_\_d\_sectors\_fill\_sysmem}) against the weight bytes of the eight routed experts, one eager decode step at batch 1.}\label{tab:moe-traffic}
+\end{table}
+
+\paragraph{Other backends.}
+vLLM chooses the MoE backend from a priority list. On Hopper it moves Triton to the front for
+block FP8 without expert parallelism; SM12x has no such rule and falls through to DeepGEMM.
+\Cref{tab:moe-backend} runs the same model with each backend, CUDA graphs on. Triton keeps the
+W8A8 path and is 12.5\% faster per decode step at batch 1 and 19.3\% at batch 4. Marlin is as fast at batch 1 and faster at batch 4, but dequantizes the weights and computes in BF16, which changes numerics.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\texttt{--moe-backend} & decode step, batch 1 & decode step, batch 4 \\
+\midrule
+\texttt{deep\_gemm} (default) & 23.52\,ms & 48.02\,ms \\
+\texttt{triton} & 20.58\,ms ($-12.5\%$) & 38.73\,ms ($-19.3\%$) \\
+\texttt{marlin} (weight-only FP8) & 20.74\,ms ($-11.8\%$) & 36.34\,ms ($-24.3\%$) \\
+\texttt{cutlass} & \multicolumn{2}{c}{not supported for this configuration} \\
+\bottomrule
+\end{tabular}
+\caption{Qwen3-30B-A3B FP8 decode step by MoE backend, vLLM 0.34.0, CUDA graphs.}\label{tab:moe-backend}
+\end{table}
+
+\paragraph{Serving.}
+With \texttt{vllm bench serve} (random 512 input and 256 output tokens, one run per point) Triton
+raises throughput from 45.32 to 54.97\,tok/s at concurrency 1 ($+21.3\%$), from 99.63 to
+117.61 at concurrency 4 ($+18.0\%$) and from 136.90 to 196.55 at concurrency 8 ($+43.6\%$). In a
+prefill-bound throughput run (4\,096 input, 16 output tokens) the two differ by 1\%. GSM8K
+(200 questions, 5-shot, greedy) is 0.965 with DeepGEMM and 0.960 with Triton. We proposed
+preferring Triton for block FP8 MoE without expert parallelism (tensor parallelism,
+including a single GPU) on SM12x, as on Hopper~\cite{vllmpr69355}. Only GB10 was measured; other SM12x parts share the kernels but not the
+memory system.
+
+\paragraph{What the case shows.}
+In the first case the books found bytes that should not have been written; in this one they found
+none, and showed instead that every byte read was needed and the reading was slow. Both answers
+come from the same accounting: per-launch bytes, the ceiling, and, where needed, what each launch
+read, wrote and pulled.

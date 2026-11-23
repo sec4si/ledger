@@ -12,11 +12,11 @@ A timeline preserves their order, but identifying the model tensors associated
 with each instance requires additional information.
 
 Consider a batch-one decode trace from vLLM on an NVIDIA DGX Spark. A
-kernel-name summary puts 148 CUTLASS FP8 launches per step in one row.
-This includes seven weight groups and one launch without captured parameters
-(\cref{tab:namelevel}). Two groups share the same launch grid and weight
+kernel-name summary puts 148 CUTLASS FP8 launches per step in one row,
+covering seven weight groups (\cref{tab:namelevel}). Two groups share the same launch grid and weight
 shape. The median runtime was 194.6~\(\mu\)s for Gated DeltaNet (GDN)
-output projections and 147.3~\(\mu\)s for attention output projections. Four representative weights from the two groups took
+output projections and 147.3~\(\mu\)s for attention output projections.
+Four representative weights from the two groups took
 147.5~\(\mu\)s each when tested in isolation. Writing 8~MiB before the
 same isolated GEMM increased its time to 187.4~\(\mu\)s
 (\cref{sec:split}). In a separate read-versus-write control, L2 data-bank
@@ -41,23 +41,40 @@ type. Nearby launches that reference cache regions provide candidates for
 follow-up experiments that test whether preceding work accounts for a
 timing difference.
 
+An optional access tracer follows reads and writes across launches. It
+identifies writes that are overwritten before any observed read using device
+addresses and launch order, without requiring a model-specific description
+of how the tensors are used. In speculative decoding, the location of
+these dead writes can change from step to step because the decoder must
+preserve the state for whichever draft position is accepted.
+
 We make three contributions.
 
 \begin{itemize}
-  \item A diagnostic workflow that combines a measured bandwidth baseline
-    with matched-launch comparisons and controlled changes to the preceding
-    workload to test for cross-kernel effects.
-  \item An open-source implementation\footnote{\url{https://github.com/sec4si/ledger}}
-    that joins CUDA launch timing and argument data with model tensor
-    identities and reports timing divergences and repeated weight
-    references.
-  \item A case study of Qwen3.8-27B NVFP4 with three speculative draft
-    tokens on DGX Spark. We first identified the projection anomaly
-    manually and subsequently reproduced it with \sys{}. We ported an
-    existing deferred-state-store scheme from the Triton path to the
-    fused CUDA path and submitted it to vLLM
-    \cite{vllmpr61434,vllmpr69160}. The CUDA change preserved
-    bitwise equality in kernel tests and greedy output tokens in the
-    tested decode runs. It increased serving throughput by 5.2\% and
-    7.5\% at concurrency four and eight, respectively, on this system.
+  \item A per-launch accounting method and open-source tool%
+    \footnote{\url{https://github.com/sec4si/ledger}} that join launch
+    timing with tensor identities and combine matched-launch comparisons
+    with a measured bandwidth baseline and controlled experiments
+    (\cref{sec:design}).
+  \item A GPU access tracer and dataflow analysis that detect dead
+    writes across launches without model-specific dataflow rules.
+    Across traces, writes that are always dead at the same locations
+    are candidates for direct removal. A stable volume of dead writes
+    at changing locations can require an algorithmic change to avoid.
+    The analysis also reports waste present only in some observed
+    steps (\cref{sec:access}).
+  \item Two case studies on DGX Spark. For speculative decoding with
+    Qwen3.8-27B NVFP4, \sys{} reproduces a manually discovered GDN
+    projection anomaly and traces unused recurrent-state writes. Those
+    writes leave dirty L2 lines that can slow the next projection.
+    Porting the deferred-store scheme proposed for the Triton path (in review) to the fused CUDA path raised serving throughput by 5.2\% and 7.5\% at concurrency four
+    and eight, respectively, with identical greedy tokens in the tested
+    decode runs (\cref{sec:case}) \cite{vllmpr61434,vllmpr69160}.
+    For Qwen3-30B-A3B FP8, \sys{} finds that less than 1\% of traced
+    writes are dead.
+    The expert GEMMs pull about the expected bytes for the routed experts
+    and achieve 60--66\% of the measured bandwidth ceiling. Switching
+    the MoE backend from DeepGEMM to Triton raised serving throughput by
+    18.0--43.6\% across the tested concurrency settings (\cref{sec:case2})
+    \cite{vllmpr69355}. Both changes were submitted to vLLM.
 \end{itemize}

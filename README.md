@@ -28,7 +28,7 @@ streams its weight. Only the state at the accepted position is ever read again.
 
 A name-level profile shows "this GEMM is slow". Ledger shows whose bill it is. Deferring the
 stores to the next step is bit-identical and raises serving throughput by 5.2% / 7.5% at
-concurrency 4 / 8 on that machine; it is upstream as
+concurrency 4 / 8 on that machine; it is submitted upstream as
 [vllm-project/vllm#69160](https://github.com/vllm-project/vllm/pull/69160). The full case study,
 with the measurements and the scripts to reproduce them, is in
 [`case-studies/gb10-qwen3.8-27b`](case-studies/gb10-qwen3.8-27b).
@@ -108,8 +108,8 @@ python -m ledger.transfers out --h2d-gbps <measured> --d2h-gbps <measured> --out
 - Some runtime-API launches reach the callback with neither a function handle nor a symbol name,
   and neither `cudaGetFuncBySymbol` nor `dladdr` on the host stub resolves them, so their
   parameters cannot be decoded (we suspect a statically linked cudart; not confirmed). In the GB10
-  case 22 of the 45 eager launches per step stay opaque; one of them streams `lm_head`.
-- Tested on NVIDIA GB10 (sm_121) with vLLM 0.31.
+  case 14 of the 45 eager launches per step stay opaque, all small PyTorch kernels.
+- Tested on NVIDIA GB10 (sm_121) with vLLM 0.31 and 0.34.
 
 - Copy addresses are decoded for linear copies (`cudaMemcpy[Async]`, `cuMemcpy[Async]`,
   `cuMemcpy{HtoD,DtoH,DtoD}[Async]` and their per-thread-stream variants) and for memcpy nodes of
@@ -117,8 +117,6 @@ python -m ledger.transfers out --h2d-gbps <measured> --d2h-gbps <measured> --out
 
 ## Next
 
-- Read and write sets per launch (binary instrumentation, e.g. NVBit) to find writes that are
-  overwritten before anyone reads them, without knowing the model.
 - Multi-GPU: account for collectives.
 
 ## License

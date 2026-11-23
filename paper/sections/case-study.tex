@@ -17,7 +17,7 @@ capture.
 \centering\small
 \begin{tabular}{@{}ll@{}}
 \toprule
-Machine & NVIDIA DGX Spark: GB10 (sm\_121, 48 SMs, 24\,MB L2), 121\,GB unified LPDDR5x \\
+Machine & NVIDIA DGX Spark: GB10 (sm\_121, 48 SMs, 24\,MiB L2), 121\,GB unified LPDDR5x \\
 Engine & vLLM 0.31.0 (main measurements), 0.34.0 and main (comparison); CUDA graphs \\
 Model & Qwen3.8-27B, NVFP4 checkpoint (NVFP4 MLP in layers 0--55, FP8 elsewhere) \\
 Architecture & 64 layers: 48 Gated DeltaNet, 16 full attention \\
@@ -39,8 +39,8 @@ The specification is 273\,GB/s. We use 252\,GB/s throughout.
 
 \Cref{tab:step} gives the step books. Kernels are back to back: the gaps between them add up to
 0.36\,ms per step, 0.3\%. Fusing kernels to remove launch gaps buys almost nothing on this
-machine. Weight streaming runs at 80\% of the ceiling overall; at the ceiling the step would take
-96\,ms instead of 121.
+machine. Weight streaming runs at 84\% of the ceiling overall; at the ceiling the step would take
+101\,ms instead of 121.
 
 \begin{table}[t]
 \centering\small
@@ -52,9 +52,9 @@ Wall time & 120.9\,ms \\
 GPU busy & 120.5\,ms \\
 Idle between kernels & 0.36\,ms (0.3\%) \\
 Launches & 972 \\
-Weight bytes streamed & 24.2\,GB \\
-Effective bandwidth & 201\,GB/s (80\% of ceiling) \\
-Floor at the ceiling & 96.0\,ms \\
+Weight bytes streamed & 25.5\,GB \\
+Effective bandwidth & 211\,GB/s (84\% of ceiling) \\
+Floor at the ceiling & 101.1\,ms \\
 \bottomrule
 \end{tabular}
 \caption{Step books at batch 1 (vLLM 0.31.0).}\label{tab:step}
@@ -186,8 +186,9 @@ costs about 4\,\textmu s per GDN launch at batch 1 and 14\,\textmu s at batch 4.
 
 \subsection{Upstream}
 
-We reported the issue~\cite{vllmissue69152} and ported the deferred stores to vLLM main on top of
-the Triton change~\cite{vllmpr69160}. On main the CUDA kernel writes its records in the Triton
+We reported the issue~\cite{vllmissue69152} and ported the deferred stores to vLLM main on top of the
+Triton change, which is still in review~\cite{vllmpr69160}. Both arms below therefore run main with
+both changes applied. On main the CUDA kernel writes its records in the Triton
 kernel's layout, one record per 16-row V block, so that a request can move between the fused CUDA
 op and the Triton speculative path from one step to the next. That costs some speed against our
 prototype (116 instead of 97\,\textmu s for the GDN kernel at batch 4). \Cref{tab:upstream} gives the end-to-end result on the same machine. The baseline is not

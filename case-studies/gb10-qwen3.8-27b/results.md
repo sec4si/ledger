@@ -62,7 +62,7 @@ float:  Copy 245514  Mul 247194  Add 248109  Triad 248340  Dot 246542
 | all r1 | 1 | 120.86 ms | 40.9 us | 194.7 us | 149.0 us | 432.6 us | 5514 us |
 | last r1 | 1 | 119.67 ms | 23.3 us | 162.7 us | 149.3 us | 449.4 us | 5517 us |
 | all r2 | 1 | 121.02 ms | 40.6 us | 194.4 us | 149.7 us | 433.2 us | 5492 us |
-| last r2 | 1 | excluded: fell back to eager after the corrupted state | | | | | |
+| last r2 | 1 | excluded: fell back to eager (cause unknown) | | | | | |
 | all r1 | 4 | 131.56 ms | 267.6 us | 199.5 us | 149.9 us | 439.5 us | 5501 us |
 | last r1 | 4 | 122.53 ms | 83.8 us | 192.1 us | 149.5 us | 438.5 us | 5494 us |
 | all r2 | 4 | 131.93 ms | 267.6 us | 200.1 us | 150.4 us | 441.3 us | 5514 us |

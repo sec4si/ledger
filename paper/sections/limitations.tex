@@ -28,20 +28,36 @@ nor a symbol name, and neither the cudart lookup nor \texttt{dladdr} on the host
 resolves them, so neither path applies. We suspect a cudart other than the one \sys{} queries
 (for example, a statically linked copy), but have not confirmed the cause.
 In our batch-1 GB10 window (38,880 launches across 40 steps, or 972 per step), all 927
-graph kernel nodes per step resolve, while 22 of the 45 direct launches per step (880 in
-the window) carry no parameters (\cref{sec:coverage}).
-One of those 22 is a draft-step \texttt{lm\_head} launch of the same CUTLASS kernel that
-already appears in the captured graphs; its layout is known, and it is dropped only because
-its name is absent at launch time.
+graph kernel nodes per step resolve, while 14 of the 45 direct launches per step (560 in
+the window) carry no parameters (\cref{sec:coverage}); all of them are small PyTorch kernels that
+stream no weight.
+
+\paragraph{Access tracer boundaries.}
+The Compute Sanitizer access tracer (\cref{sec:access}) complements launch-level accounting
+with byte-level read/write sets, but carries its own limits.
+First, it is slow: in the one step we timed, about $80\times$, which includes per-access
+instrumentation as well as a synchronization and tensor comparison around every tensor-map
+launch. It is practical only over a few steps; we have not benchmarked its overhead systematically.
+Second, because TMA transfers are not instrumented by the Sanitizer API, TMA writes are
+inferred by comparing tensor contents before and after a launch; a write that stores the
+same value already present is missed, so TMA write volumes are a lower bound.
+Third, any launch the tracer cannot inspect is treated conservatively as reading and
+writing every region its pointers land in, which can hide real waste but cannot invent
+false-positive dead writes.
+Fourth, in CUDA graph mode, DeepGEMM's activation tensor maps encode a large fixed row
+extent, causing the tracer to credit those launches with reading up to the end of the
+allocation segment each map starts in; this over-approximation can mask dead writes from
+preceding scatter kernels, making eager-mode traces more precise for such workloads
+(\cref{sec:case2}).
 
 \paragraph{Experimental scope and methodology.}
-Our evaluation covers one hardware architecture (NVIDIA GB10, \texttt{sm\_121}), one model
-family (Qwen3.8-27B NVFP4 with \texttt{qwen3\_5\_mtp}, $k{=}3$), and one serving engine
-(vLLM 0.31.0, 0.34.0, and \texttt{main}).
+Our evaluation covers one hardware architecture (NVIDIA GB10, \texttt{sm\_121}), two model
+families (Qwen3.8-27B NVFP4 with \texttt{qwen3\_5\_mtp}, $k{=}3$, and Qwen3-30B-A3B FP8
+MoE), and one serving engine (vLLM 0.31.0, 0.34.0, and \texttt{main}).
 Because GB10 sits at its software power cap, whole-step wall-clock drift is comparable to
 the batch-1 effect size, making per-kernel and GPU-busy measurements essential for
 batch-1 comparisons.
-We also note two caveats in the case study itself: first, two runs fell back from CUDA
+We also note two caveats in the first case study: first, two runs fell back from CUDA
 graphs to eager execution and were excluded---the second batch-1 run of the last-position-only probe and one
 unmodified batch-4 baseline run. We did not determine the cause; since an unmodified run fell
 back as well, we do not attribute it to the probe's corrupted state; second, our deferred-store
@@ -54,12 +70,9 @@ afterward to systematize the workflow and automatically reproduces the finding w
 manual intervention.
 
 \paragraph{Future work.}
-Two extensions would remove the main manual steps in our current workflow.
-First, pairing \sys{} with per-launch read and write sets collected via dynamic binary
-instrumentation such as NVBit~\cite{villa2019nvbit} would quantify dirty write volumes
-directly and detect dead writes---addresses written by one launch and overwritten before any
-subsequent launch reads them---without model-specific knowledge.
-Second, extending the accounting model to multi-GPU serving would track collective
-communication launches (such as AllReduce and AllGather) alongside weight streams and cache
-traffic, enabling the same invariant-based attribution on tensor- and pipeline-parallel
-deployments.
+Extending the accounting model to multi-GPU serving would track collective communication
+launches (such as AllReduce and AllGather) alongside weight streams, cache traffic, and
+byte-level dataflow, enabling the same invariant-based attribution on tensor- and
+pipeline-parallel deployments.
+Evaluating \sys{} across additional GPU architectures and serving engines remains future
+work.

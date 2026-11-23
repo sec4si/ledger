@@ -2,8 +2,11 @@
 
 \sys{} has three parts: a capture library preloaded into the unmodified engine, a memory map
 exported by the engine once, and an offline analysis that joins the two
-(\cref{fig:pipeline}). The capture library is 350 lines of C++ against CUPTI; the memory map
-exporter for vLLM is 60 lines of Python; the analysis is 330 lines of Python.
+(\cref{fig:pipeline}). A second, much slower preload library, the access tracer
+(\cref{sec:access}), records what every launch read and wrote; it is used on a few steps once the
+books point at something. The capture library is about 510 lines of C++ against CUPTI; the memory map
+exporter for vLLM is about 70 lines of Python; the report is about 330 lines of Python. The access
+tracer is about 940 lines of C++ and device code, and the dataflow analysis about 540 lines of Python.
 
 \begin{figure}[t]
 \centering
@@ -44,9 +47,9 @@ library that cached by name crashed the engine. A runtime launch names a host st
 function; the library resolves it through \texttt{cudaGetFuncBySymbol} of the cudart the
 application already loaded (looked up with \texttt{RTLD\_NOLOAD}, since Python extensions load
 cudart privately). A failed lookup leaves an error in cudart's per-thread last-error slot, which
-the application would later report as its own, so the library clears it. For some runtime launches this lookup fails and CUPTI reports no symbol name; for those the library
-falls back to a by-name layout found from the host stub, but only for names that have a single
-layout everywhere in the process.
+the application would later report as its own, so the library clears it. When this lookup fails, the library
+falls back to a layout recorded under the kernel's name (taken from CUPTI or, failing that, from
+the host stub's symbol), but only for names that have a single layout everywhere in the process.
 
 \paragraph{Window.}
 Kernel timing is enabled between \texttt{cudaProfilerStart} and \texttt{cudaProfilerStop}, the
@@ -76,6 +79,40 @@ Cache regions referenced by a launch are recorded as \emph{touched}.
 The byte model is deliberately simple: a weight-streaming launch reads its weight once. This holds
 for decode with a handful of tokens per step, where activations are a small fraction of the
 traffic, and fails for prefill and large batches (\cref{sec:limits}).
+
+\subsection{Access tracing}\label{sec:access}
+
+Launch parameters say which tensors a launch was given, not which bytes it touched or whether
+anyone used what it wrote. For that, the access tracer instruments every load and store with the
+Compute Sanitizer API. A device patch logs, per launch, each 1\,KiB granule of device memory read
+and each written, with a 32-byte sub-block mask; each (launch, granule, kind) is logged once, and
+weights are skipped, since they are read-only and already accounted for. Memory copies and sets
+are recorded as byte ranges.
+
+Two parts of a serving engine are invisible to the Sanitizer API as is. Inside a CUDA graph every
+node receives the callback data of the last one, so accesses cannot be told apart; the tracer keeps
+a copy of each graph at instantiation and, when the program launches it, launches its nodes one by
+one on the same stream in an order its edges allow, then an empty graph in its place. The program
+runs unchanged otherwise. Tensor-memory-accelerator (TMA) copies are not instrumented either; the
+tracer decodes the tensor maps among a launch's parameters, takes the launch to read every tensor
+they span, and finds what it wrote by comparing those tensors before and after it. That misses a
+write of the value already there, so it is a lower bound. A launch the tracer cannot see into is
+taken to read and write everything its pointers land in: the blind spot can hide waste but not
+invent it.
+
+The dataflow analysis follows bytes from writer to reader across the launches of a step and reports
+\emph{dead writes}, bytes overwritten before anyone read them, and the launches that write them.
+A write dead in one step may be dead only because of that step's input: a speculative step keeps
+the state of whichever draft position was accepted. Comparing traces of several requests and steps,
+the analysis splits dead bytes into \emph{fixed} ones, dead at the same addresses in every step,
+which can simply be dropped, and \emph{moving} ones, as many dead every step but at addresses that
+depend on the input, which can only be avoided by changing the algorithm.
+
+Finally, needed bytes (the weight a launch streams plus the distinct non-weight bytes the tracer
+saw it read) can be set against the bytes the L2 filled from memory while it ran, taken from an
+Nsight Compute profile of the same step. A launch that pulls far more than it needs re-reads or
+fetches uncoalesced; one that pulls about what it needs but runs slowly is limited by something
+other than memory.
 
 \subsection{Analysis}\label{sec:analysis}
 

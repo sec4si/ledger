@@ -41,17 +41,38 @@ benchmarking and system co-design
 cold starts, Medusa prepares CUDA graphs and KV-cache initialization
 metadata offline, and Foundry saves graph topology and execution
 context for template-based reconstruction
-\cite{zeng2025medusa,liu2026foundry}. \sys{} uses CUDA
-graph node metadata to interpret timings in a steady-state trace.
-NVBit supports instruction-level memory reference tracing
-\cite{villa2019nvbit}. Von Buelow et al. use instrumented memory
-references to simulate L1 and L2 behavior and estimate hit rates per
-allocation \cite{buelow2022finegrained}. DrGPUM correlates memory
-inefficiencies such as redundant or unused allocations with data objects
-and GPU API calls
-\cite{lin2023drgpum}. \sys{} uses launch arguments as a proxy for
-tensor references and measures the timing of the launches in the
-running engine.
+\cite{zeng2025medusa,liu2026foundry}. \sys{} uses CUDA graph node
+metadata to interpret timings in a steady-state trace.
+NVBit supports dynamic binary instrumentation of GPU instructions,
+including memory reference tracing. The Compute Sanitizer patching API
+supports device callbacks at memory accesses
+\cite{villa2019nvbit,nvidiaSanitizerApi}. Von Buelow et al. use
+instrumented memory references to simulate L1 and L2 behavior and
+estimate hit rates per allocation \cite{buelow2022finegrained}.
+TenProf traces PyTorch tensor transformations and links GPU memory
+accesses and hardware stalls to base tensors and views
+\cite{ding2026tenprof}.
+\sys{} uses the Sanitizer API to build per-launch read and write masks
+and relates them to timings from a separate capture.
+
+\paragraph{Dead writes and value redundancy.}
+DeadSpy instruments CPU memory accesses to find stores overwritten
+before an intervening read and attributes them to source locations and
+calling contexts \cite{chabbi2012deadspy}. DrGPUM detects an
+object-level dead-write pattern when GPU memory copies or sets overwrite
+a data object without intervening GPU API accesses to that object
+\cite{lin2023drgpum}. RedSpy profiles value redundancies at instruction
+granularity, including writes that leave the destination unchanged
+\cite{wen2017redspy}. GVProf identifies temporal and spatial value
+redundancy in GPU loads and stores \cite{zhou2020gvprof}. ValueExpert
+tracks values across GPU API invocations to identify patterns such as
+duplicate values in different data objects \cite{zhou2022valueexpert}.
+RedSan uses binary instrumentation to detect redundant memory
+instructions in optimized CUDA programs \cite{zhao2025redsan}.
+\sys{} tracks device-memory liveness across decode launches from
+access addresses and order. It compares dead-write masks across
+observed decode steps to distinguish persistent dead locations from
+waste that varies with the step (\cref{sec:access}).
 
 \paragraph{GPU interference across kernels.}
 Elvinger et al. characterize L2 cache pollution and bandwidth

@@ -5,7 +5,7 @@
 Profilers such as Nsight Systems summarize kernels by name. \Cref{tab:namelevel} applies that
 grouping and \sys{}'s grouping to the same 38\,880 launches of the batch-1 capture. By name, the
 CUTLASS FP8 GEMM is a single row: 148 launches and 66.7\,ms per step, spread over seven weight
-groups plus one launch without parameters, with a coefficient of variation of 1.92. Nothing in that row distinguishes a 47\,\textmu s
+groups, with a coefficient of variation of 1.92. Nothing in that row distinguishes a 47\,\textmu s
 excess on one weight group from the expected spread of different shapes. Split by weight, shape
 and grid, each group is tight (the 10th to 90th percentile range is under 4\% of the median), and the GDN \texttt{out\_proj} and attention \texttt{o\_proj} groups, which share the
 kernel, the grid and the shape, sit 47\,\textmu s apart.
@@ -27,14 +27,14 @@ Group & launches/step & ms/step & median (\textmu s) & p10--p90 (\textmu s) \\
 CUTLASS sm120 FP8 GEMM & 148 & 66.67 & 328.3 & 150.0--406.5 \\
 \midrule
 \multicolumn{5}{@{}l}{\emph{Same launches, by weight, shape and grid}} \\
+\texttt{lm\_head} $[5120,248320]$ & 4 & 22.28 & 5562.2 & 5552.1--5589.1 \\
 \texttt{linear\_attn.in\_proj\_qkvz} $[5120,16384]$ & 48 & 17.98 & 374.2 & 368.9--379.8 \\
-\texttt{lm\_head} $[5120,248320]$ & 3 & 16.73 & 5565.8 & 5554.0--5606.5 \\
 \texttt{linear\_attn.out\_proj} $[6144,5120]$ & 48 & 9.33 & \textbf{194.6} & 190.6--197.5 \\
 \texttt{mlp.gate\_up\_proj} $[5120,34816]$ & 8 & 6.25 & 779.7 & 774.2--791.7 \\
 \texttt{self\_attn.qkv\_proj} $[5120,14336]$ & 16 & 5.24 & 327.2 & 321.6--332.5 \\
 \texttt{mlp.down\_proj} $[17408,5120]$ & 8 & 3.23 & 404.3 & 395.7--410.5 \\
 \texttt{self\_attn.o\_proj} $[6144,5120]$ & 16 & 2.36 & \textbf{147.3} & 144.5--149.6 \\
-(no parameters; an \texttt{lm\_head} read, \cref{sec:coverage}) & 1 & 5.56 & & \\
+
 \bottomrule
 \end{tabular}
 \caption{One CUTLASS kernel, grouped by name and by what each launch read. Batch 1, 40 steps.}\label{tab:namelevel}
@@ -53,19 +53,20 @@ kernel activity records, which any tracing profiler pays as well.
 \subsection{Coverage}\label{sec:coverage}
 
 Of the 972 launches per step in the batch-1 window, 927 are graph kernel nodes and 45 are direct
-launches. All graph nodes resolve. Of the direct launches, 22 per step (880 in the window) carry
-no parameters: they are runtime launches for which the callback receives neither
-a function handle nor a symbol name, \texttt{cudaGetFuncBySymbol} fails, and the host stub has no
-symbol \texttt{dladdr} can find, so neither the runtime lookup nor the by-name fallback applies.
-We suspect the launching code uses a cudart other than the one the lookup goes through (a
-statically linked copy, for instance), but have not confirmed it. Most are small PyTorch elementwise and indexing
-kernels. One is the \texttt{lm\_head} GEMM of a draft step, the same CUTLASS kernel that appears
-in the graphs, whose layout \sys{} therefore knows; it is lost only because its name is unknown at
-launch time. This is why \sys{} counts three of the four \texttt{lm\_head} reads per step.
-\sys{} attributes 24.20\,GB of weight
-reads per step; adding the one unattributed \texttt{lm\_head} read (1.27\,GB) gives 25.47\,GB,
-which matches the 25.5\,GB we had computed by hand, before \sys{} existed, from the weight sizes
-and the number of forward passes per step.
+launches. All graph nodes resolve. Of the direct launches, 14 per step (560 in the window) carry
+no parameters: for these the callback receives neither a function handle nor a symbol name,
+\texttt{cudaGetFuncBySymbol} fails, and the host stub has no symbol \texttt{dladdr} can find, so
+neither the runtime lookup nor the by-name fallback applies. We suspect the launching code uses a
+cudart other than the one the lookup goes through, but have not confirmed it. All 14 are small
+PyTorch elementwise, fill and indexing kernels; none streams a weight. \sys{} attributes 25.47\,GB
+of weight reads per step, including all four \texttt{lm\_head} reads, which matches the 25.5\,GB
+we had computed by hand, before \sys{} existed, from the weight sizes and the number of forward
+passes per step.
+
+An earlier version of the analysis reported 22 launches per step without parameters, among them
+one \texttt{lm\_head} read. A runtime launch reaches both the runtime and the driver callback under
+the same correlation id, and the driver record can come without parameters; the analysis kept
+whichever record came last. It now keeps the one that carries parameters.
 
 \subsection{Hardware counters}\label{sec:ncu}
 
@@ -107,3 +108,58 @@ signal here. We read the extra accesses as dirty lines being read out of
 the data banks for write-back; the counter does not name its cause, but nothing else in the
 launch differs. They amount to 81\% and 67\% of the sectors written for 4 and 12\,MiB; the rest is presumably
 written back before the GEMM starts. At 24\,MiB, a full L2, the share drops to 44\%.
+
+\subsection{Dead writes without knowing the model}\label{sec:deadwrites}
+
+The access tracer was not available when we found the GDN stores. Run afterwards, it reaches the
+same place without being told where to look. We traced a replay of the vLLM 0.31.0 recording of the
+first case (the same kernels at the same addresses, batch 1, every graph launched node by node):
+all 974 launches per step are seen (two more than in the engine capture of
+\cref{sec:case}; we did not track down the difference), the 269 tensor-map launches included. Four traces of the same
+prompt with different seeds and temperatures give 44 resolved steps (\cref{tab:dead}).
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Kernel & launches & written & dead & fixed & moving & varies \\
+\midrule
+GDN decode (\texttt{gdn\_decode\_post\_conv\_mtp}) & 48 & 606.34 & 452.98 & 0.00 & 452.98 & 0.00 \\
+causal conv1d update & 48 & 9.83 & 2.95 & 0.00 & 2.95 & 0.00 \\
+zero fill (\texttt{triton\_poi\_fused\_zeros}) & 47 & 2.31 & 2.31 & 2.31 & 0.00 & 0.00 \\
+temperature & 1 & 3.97 & 0.79 & 0.00 & 0.00 & 0.79 \\
+slot mappings & 3 & 0.79 & 0.79 & 0.79 & 0.00 & 0.00 \\
+FP4 activation quantization & 72 & 6.68 & 0.28 & 0.28 & 0.00 & 0.00 \\
+\midrule
+All launches & 974 & 711.87 & 460.18 & 3.43 & 455.96 & 0.79 \\
+\bottomrule
+\end{tabular}
+\caption{Dead writes per decode step of Qwen3.8-27B (MB per step, mean over 44 steps of four traces).}\label{tab:dead}
+\end{table}
+
+Of 712\,MB written per step, 460\,MB is overwritten before anyone reads it, and 453\,MB of that
+comes from the GDN decode kernel: three of the four per-position states, as the source reading in
+\cref{sec:split} predicted. The analysis classifies all of it as moving. As many bytes are dead in
+every step, but which ones depends on how many drafts were accepted, which is not known when they
+are written; they cannot be dropped, only deferred, which is the fix of \cref{sec:case}. The
+causal-convolution state behaves the same way. Only 3.4\,MB per step is fixed, mostly zero fills
+that nobody reads, and 0.8\,MB varies: the temperature kernel scales the logits of all four
+positions, and the last is read only when every draft is accepted.
+
+Dead in the dataflow sense means never read. A second, value-level test asks whether the output
+depends on a write at all: a replay harness poisons one launch's output tensor right after the
+launch and compares the generated tokens with a baseline. Of 3\,172 such experiments, 934, covering 476.3\,MB of a step's writes, left the tokens unchanged
+over three steps. Rerun over 24 steps, 853 of them (473.8\,MB) still did; 47 (1.3\,MB) changed the
+tokens only after the third step, mostly the FP4-quantized activations, and 34 (1.2\,MB) disagreed
+between repetitions for reasons we have not found, so a verdict is good to about 1\,MB. In the
+traced request the first step accepted every draft, so only the last GDN position was read and the
+other three stayed unused over all 24 steps.
+
+\subsection{Cost of access tracing}\label{sec:tracecost}
+
+We have not measured the access tracer's overhead systematically. As an order of magnitude, one
+batch-1 decode step of Qwen3-30B-A3B with CUDA graphs took 20.6\,ms without the tracer and about
+1.7\,s with it, roughly 80 times slower, including a synchronization and a tensor comparison around
+every tensor-map launch. The tracer is meant for a few steps once the per-launch books point at
+something, not for continuous use.
+

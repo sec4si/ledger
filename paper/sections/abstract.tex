@@ -11,7 +11,12 @@ running Qwen3.8-27B with multi-token-prediction speculative decoding in vLLM, th
 projection of the Gated DeltaNet layers took 194.6\,\textmu s while the attention output
 projection, the same kernel on a weight of the same shape, took 147.3\,\textmu s. The cause is the
 preceding recurrent-state update, which writes 12.6\,MB of state per layer, one copy per token of the step,
-of which only the accepted position's is read again; the dirty lines are written back on the projection's time. Deferring
-those stores is bit-identical and raises serving throughput by 5.2\% and 7.5\% at concurrency 4
-and 8; the change has been submitted to vLLM. The capture overhead, 0.3\% of step time, is within run-to-run variation.
+of which only the accepted position's is read again; timing and L2 counters indicate that the
+dirty lines are written back on the projection's time. Deferring those stores is bit-identical and raises serving throughput by 5.2\% and 7.5\% at concurrency 4
+and 8. An access tracer built on the Compute Sanitizer API records what every launch read and
+wrote, through CUDA graphs and tensor-memory copies, and separates dead writes that can be dropped
+from those that depend on the input, such as these. On a mixture-of-experts model it finds almost
+no dead writes; L2 fill counters show instead that the expert GEMMs pull little more than the routed
+experts' bytes, at 60--66\% of the ceiling; a different MoE backend raises serving throughput by 18--44\%. Both changes have
+been submitted to vLLM. The capture overhead, 0.3\% of step time, is within run-to-run variation.
 \end{abstract}

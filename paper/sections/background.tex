@@ -4,7 +4,7 @@
 
 Autoregressive decoding generates one or a few tokens per request per step.
 Unlike prefill, where matrix multiplications operate on long prompts and are compute-bound,
-low-batch decode has low arithmetic intensity: every step streams the model's full weight set
+low-batch decode has low arithmetic intensity: every step streams the weights it uses (the full set for a dense model, the routed experts for a mixture of experts)
 from off-chip memory for a handful of token rows, making decode memory-bandwidth bound
 under the roofline model~\cite{williams2009roofline}.
 Each transformer or hybrid layer issues a sequence of weight-streaming GEMMs
@@ -56,9 +56,30 @@ When these stores land in a write-back L2 cache, the GDN kernel can retire quick
 leaving megabytes of dirty cache lines whose DRAM write-back traffic contends with the
 weight-streaming GEMM that immediately follows.
 
+\subsection{Mixture-of-Experts Decode and Block-FP8 Grouped GEMMs}
+
+Sparse Mixture-of-Experts (MoE) models replace dense MLP layers with a bank of expert
+feed-forward networks and a lightweight router that selects a small subset of routed experts
+for each token.
+During low-batch decode, only the active experts' weights need to be streamed from memory,
+reducing per-step weight traffic relative to the total parameter count.
+Rather than launching a separate kernel per expert, serving engines permute tokens by routed
+expert and invoke a grouped GEMM over the active experts.
+
+When expert weights are stored in block-quantized FP8 format, each weight matrix is paired
+with per-block scaling factors (block FP8 scales) that must be fetched alongside the weight
+tiles.
+On modern NVIDIA GPUs, specialized kernels such as DeepGEMM load operands through the
+hardware Tensor Memory Accelerator (TMA) via tensor-map descriptors rather than ordinary
+thread-level load instructions.
+Because TMA transfers bypass per-thread load/store instrumentation and group multiple
+experts into a single kernel launch, accounting for MoE decode requires knowing both how
+many bytes each grouped GEMM actually pulls from memory and whether its achieved bandwidth
+matches the device ceiling (\cref{sec:case2}).
+
 \subsection{Target Platform: NVIDIA DGX Spark (GB10)}
 
-Our case study runs on an NVIDIA DGX Spark built around the GB10 SoC
+Our case studies run on an NVIDIA DGX Spark built around the GB10 SoC
 (\texttt{sm\_121}, 48 SMs, 24~MiB L2 cache) backed by 121~GB of unified LPDDR5x memory.
 While the datasheet quotes 273~GB/s peak bandwidth, microbenchmarks---our read-only
 streaming kernel (\texttt{bwtest}) and BabelStream~\cite{deakin2016babelstream}---consistently

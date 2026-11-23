@@ -36,9 +36,9 @@ Ledger, batch 1 (`report-031.md` has the full output, `results.md` the raw numbe
 | GPU busy | 120.5 ms |
 | idle between kernels | 0.36 ms (0.3%) |
 | launches | 972 |
-| weight bytes streamed | 24.2 GB |
-| effective bandwidth | 201 GB/s, 80% of the ceiling |
-| floor at the ceiling | 96 ms |
+| weight bytes streamed | 25.5 GB |
+| effective bandwidth | 211 GB/s, 84% of the ceiling |
+| floor at the ceiling | 101 ms |
 
 The step is bandwidth-bound end to end, and idle time between kernels is negligible: fusing
 kernels to remove launch gaps buys almost nothing on this machine. Batch 2 costs the same as
@@ -49,9 +49,7 @@ batch 1 within noise, as expected when every step streams the full weight set.
 Most weight-streaming launches run at 85 to 96% of the ceiling. Two items stand out:
 
 - **`lm_head` is read four times per step.** The main model reads it once and each of the three
-  MTP draft steps reads the full 248k-vocabulary head again: 5.1 GB, about 18% of the step. (Ledger
-  attributes three of the four reads; one launch reaches the capture library without a
-  function handle or name, so its parameters cannot be decoded.)
+  MTP draft steps reads the full 248k-vocabulary head again: 5.1 GB, about 18% of the step.
 - **GDN `out_proj` runs at 64%**, far below its neighbours. Section 4.
 
 ## 4. Same kernel, same shape, different speed
@@ -155,7 +153,7 @@ runs, as eager and graph execution do in vLLM regardless of this change.
 
 ## 7. Upstream
 
-Reported as [vllm-project/vllm#69152](https://github.com/vllm-project/vllm/issues/69152) and fixed in
+Reported as [vllm-project/vllm#69152](https://github.com/vllm-project/vllm/issues/69152) and a fix submitted in
 [vllm-project/vllm#69160](https://github.com/vllm-project/vllm/pull/69160), which ports the
 deferred stores to vLLM main on top of #61434. On main the CUDA kernel writes its records in the
 Triton kernel's layout (one record per 16-row V block), so a request can move between the fused
