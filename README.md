@@ -155,7 +155,8 @@ Nsight Compute profile to compare what each launch needed with what it pulled fr
   it (a write of the value already there does not show) and takes it to read every tensor its maps
   span; maps encoded for more rows than their tensor holds (DeepGEMM's) then read too much, which
   can hide dead writes but not invent them. Maps kept in device memory are not found. The tracer
-  slows a program down by about two orders of magnitude (not measured systematically).
+  slows a decode step down 7 to 80 times on GB10 (`access/README.md`); the capture library by at
+  most 7%.
 - Dead writes are found for the inputs traced; a value experiment's verdict holds for the steps it
   compares (24 steps changed it for 0.3% of the bytes judged unused over 3) and was not reproducible
   for about 1 MB of 476 MB.
