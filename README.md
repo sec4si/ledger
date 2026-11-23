@@ -95,8 +95,40 @@ LD_PRELOAD=$PWD/capture/libledger.so LEDGER_OUT=out LEDGER_GRAPH_WINDOW=8:44 <re
 Analyze:
 
 ```sh
-python -m ledger.analyze out --ceiling-gbps <measured> --out report.md
+python -m ledger.analyze out --ceiling-gbps <measured> [--peak-tflops bf16=<>,fp8=<>] --out report.md
 ```
+
+Besides the books per weight, the report lists launches with fewer blocks than the GPU has SMs, with
+the time they run alone (a launch on a parallel graph branch costs the step less than its duration),
+and, given measured peaks (`python bench/flops.py`), each weight-streaming launch against both
+ceilings: bytes at the bandwidth ceiling and FLOPs at the peak of its precision. FLOPs take M from
+`run.json` (prefill tokens, or batch times one plus the draft tokens), which fits vLLM's layout. With
+`--prefill N`, `examples/vllm_decode.py` times one step that prefills an N-token prompt; give vLLM a
+CUDA graph of that size (`--compilation-config '{"cudagraph_capture_sizes": [..., N]}'`), since eager
+prefill GEMMs often reach the capture library without parameters.
+
+Per step (`examples/vllm_decode.py` puts a marker kernel at the start of each step and writes
+`steps.jsonl`: host time, tokens per request, SM clock, power and temperature):
+
+```sh
+python -m ledger.steps out --ceiling-gbps <measured>
+```
+
+reports the cycle from step to step split into GPU busy, idle inside the step and idle between steps
+(host work the GPU waits for); with speculative decoding, tokens gained per step, main-model and
+draft time and the cost per generated token; attention launches against one read of K and V for the
+context (run with `--prompt-tokens N` for a long one); and steps that ran slow on a lower clock.
+
+Two captures of the same program, before and after a change:
+
+```sh
+python -m ledger.diff before after --ceiling-gbps <measured>
+```
+
+groups launches by kernel, grid and weight, takes the time-weighted median ratio of the groups both
+runs share as the drift (clock, power cap), and lists the groups that moved beyond it, kernels whose
+template arguments changed paired by short name, and whether the generated tokens match.
+
 
 Memory copies in the window are kept the same way. Engines that hold part of the model off the GPU
 (expert or KV offload, weight streaming) pay for it in copies, and a copy costs the step only the

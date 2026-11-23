@@ -13,7 +13,20 @@ from pathlib import Path
 def dump_regions(worker, out_dir):
     import torch
 
-    regions, seen = [], set()
+    regions, seen, attention = [], set(), []
+
+    def add_attention(layer_name, layer, t):
+        """Attention layers: where the layer's view of the cache starts and the bytes of K and V per
+        cached token. Hybrid models carve every layer's cache out of one shared storage, so the
+        storage cannot tell layers apart; the view's first byte can (attention kernels get it)."""
+        heads, size = getattr(layer, "num_kv_heads", None), getattr(layer, "head_size", None)
+        dtype = getattr(layer, "kv_cache_torch_dtype", None)
+        if not (heads and size and isinstance(dtype, torch.dtype) and isinstance(t, torch.Tensor) and t.is_cuda):
+            return
+        span = (sum((n - 1) * st for n, st in zip(t.shape, t.stride())) + 1) * t.element_size()
+        attention.append({"kind": "attention", "name": layer_name, "addr": t.data_ptr(), "size": span,
+                          "shape": list(t.shape), "dtype": str(t.dtype).replace("torch.", ""),
+                          "kv_bytes_per_token": 2 * heads * size * dtype.itemsize})
 
     def add(kind, name, t):
         if not (isinstance(t, torch.Tensor) and t.is_cuda):
@@ -57,6 +70,7 @@ def dump_regions(worker, out_dir):
             tensors = t if isinstance(t, (list, tuple)) else [t]
             for j, tensor in enumerate(tensors):
                 add("cache", f"{layer_name}[{i}][{j}]", tensor)
+                add_attention(layer_name, layer, tensor)
 
     # Allocation segments of the caching allocator: where an unnamed pointer's tensor can lie.
     for seg in torch.cuda.memory_snapshot():
@@ -65,4 +79,5 @@ def dump_regions(worker, out_dir):
 
     path = Path(out_dir) / f"regions-{os.getpid()}.json"
     path.write_text(json.dumps(regions))
+    (Path(out_dir) / f"attention-{os.getpid()}.json").write_text(json.dumps(attention))
     return len(regions)

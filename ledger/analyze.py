@@ -11,7 +11,14 @@ What it reports
     durations split by which weight they read. Such splits come from the surroundings rather than
     the kernel, most often from the preceding kernel's writes being flushed from L2 on our time;
     the report lists the preceding kernels and the caches they touched;
-  * repeated reads: weights streamed more than once per step.
+  * repeated reads: weights streamed more than once per step;
+  * launches with fewer blocks than SMs, with the time each ran alone (needs the SM count: run.json
+    or --sms);
+  * with --peak-tflops, weight-streaming launches against both ceilings, bandwidth and compute.
+
+Step markers (`spin_kernel`, launched by examples/vllm_decode.py) are left out of the books; they
+cut the window into steps and mark launches from the first draft-model weight of a step on as draft.
+
 
 Byte counts assume a decode step reads each referenced weight tensor once per launch and ignore
 activations, which is accurate when the batch is a handful of tokens.
@@ -21,6 +28,7 @@ import argparse
 import bisect
 import glob
 import json
+import math
 import os
 import re
 import statistics
@@ -41,17 +49,24 @@ def read_jsonl(pattern):
 
 
 class Memory:
-    """Address -> region lookup over the exported memory map."""
+    """Address -> region lookup over the exported memory map. Named regions (weights, caches, buffers)
+    win over the allocation segments that contain them: a segment and the first tensor in it start at
+    the same address."""
 
     def __init__(self, regions):
-        self.regions = sorted(regions, key=lambda r: r["addr"])
+        self.regions = sorted(regions, key=lambda r: (r["kind"] == "segment", r["addr"]))
+        self.split = sum(r["kind"] != "segment" for r in self.regions)
         self.starts = [r["addr"] for r in self.regions]
 
-    def find(self, addr):
-        i = bisect.bisect_right(self.starts, addr) - 1
-        if i >= 0 and addr < self.regions[i]["addr"] + self.regions[i]["size"]:
+    def _find(self, addr, lo, hi):
+        i = bisect.bisect_right(self.starts, addr, lo, hi) - 1
+        if i >= lo and addr < self.regions[i]["addr"] + self.regions[i]["size"]:
             return i
         return None
+
+    def find(self, addr):
+        i = self._find(addr, 0, self.split)
+        return i if i is not None else self._find(addr, self.split, len(self.regions))
 
     def touched(self, params):
         """Regions referenced by any 8-byte word of the launch parameters, mapped to whether some
@@ -197,14 +212,74 @@ def busy_and_gaps(rows):
     return span, busy
 
 
+MARKER = "spin_kernel"  # torch.cuda._sleep, launched by examples/vllm_decode.py at the start of each step
+DRAFT = ("speculator.", "drafter.", "spec_decode_model.")
+
+
+def split_steps(rows):
+    """Cut the window at the step markers: (markers, steps), steps a list of row lists without the
+    markers. Rows of a step from its first launch streaming a draft-model weight on are marked
+    "draft". Without markers, (None, None)."""
+    marks = [i for i, r in enumerate(rows) if MARKER in r["name"]]
+    if not marks:
+        return None, None
+    steps = []
+    for a, b in zip(marks, marks[1:] + [len(rows)]):
+        step = rows[a + 1 : b]
+        first = next((i for i, r in enumerate(step) if r["weights"] and r["weights"][0]["name"].startswith(DRAFT)), len(step))
+        for i, r in enumerate(step):
+            r["draft"] = i >= first
+        steps.append(step)
+    return [rows[i] for i in marks], steps
+
+
+def precision(dtype):
+    """Compute class of a weight dtype. uint8 weights are taken to be packed FP4 (two per byte)."""
+    if dtype.startswith("float8"):
+        return "fp8", 1
+    if dtype in ("bfloat16", "float16"):
+        return "bf16", 1
+    if dtype == "uint8":
+        return "fp4", 2
+    return dtype, 1
+
+
+def gemm_flops(r, run):
+    """2 * M * elements of the streamed weight, M the rows the launch multiplies: in a prefill step the
+    prompt (the draft layers run over it too), in decode batch * (1 + draft tokens) for the main model
+    and batch for a draft step. The vocabulary projection only runs over the positions that are
+    sampled: batch in a prefill or draft step. vLLM's layout; other engines may differ."""
+    w = r["weights"][0]
+    cls, per_byte = precision(w["dtype"])
+    elements = math.prod(w["shape"]) * per_byte
+    batch, prefill = run.get("batch", 1), run.get("prefill", 0)
+    sampled = "lm_head" in w["name"]
+    if prefill:
+        m = batch if sampled else prefill
+    elif r.get("draft"):
+        m = batch
+    else:
+        m = batch * (1 + run.get("draft_tokens", 0))
+    return cls, m, 2 * m * elements
+
+
 def weight_key(r):
     """Group a weight-streaming launch by its main weight: folded name + shape + dtype."""
     w = r["weights"][0]
     return group_name(w["name"]), tuple(w["shape"]), w["dtype"]
 
 
-def report(capture, ceiling, steps, out):
+def load_run(capture):
+    path = os.path.join(capture, "run.json")
+    return json.load(open(path)) if os.path.exists(path) else {}
+
+
+def report(capture, ceiling, steps, out, peaks=None, sms=None):
     rows, unresolved, n_regions = build(capture, ceiling)
+    run = load_run(capture)
+    split_steps(rows)  # marks draft launches
+    rows = [r for r in rows if MARKER not in r["name"]]
+    sms = sms or run.get("sms")
     pretty = demangle([r["name"] for r in rows])
     if not rows:
         raise SystemExit("no kernel records in range")
@@ -313,10 +388,97 @@ def report(capture, ceiling, steps, out):
         emit("Partial reads (too short to stream the whole tensor, not counted above): "
              + ", ".join(f"`{n}` ×{c / steps:.1f}/step" for n, c in gathered.most_common(5)) + "\n")
 
+    if sms:
+        underfilled(rows, steps, sms, pretty, emit)
+    if peaks:
+        compute(rows, steps, ceiling, peaks, run, emit)
+
     text = "\n".join(lines)
     if out:
         open(out, "w").write(text)
     print(text)
+
+
+def alone(rows):
+    """Set each row's "alone" to the microseconds it ran with no other kernel running: on a parallel
+    graph branch a launch's duration overstates what it costs the step."""
+    events = sorted([(r["start"], 1, i) for i, r in enumerate(rows)] + [(r["end"], -1, i) for i, r in enumerate(rows)])
+    active, last = set(), None
+    for r in rows:
+        r["alone"] = 0.0
+    for t, kind, i in events:
+        if len(active) == 1 and last is not None:
+            rows[next(iter(active))]["alone"] += (t - last) / 1e3
+        if kind == 1:
+            active.add(i)
+        else:
+            active.discard(i)
+        last = t
+
+
+def underfilled(rows, steps, sms, pretty, emit):
+    """Launches with fewer blocks than SMs: whatever their occupancy, some SMs sit idle. That costs a
+    compute-bound kernel time; a bandwidth-bound one may still saturate memory with fewer SMs, so read
+    it with the launch's bandwidth. "alone" is the time no other kernel ran next to it."""
+    alone(rows)
+    groups = defaultdict(list)
+    for r in rows:
+        if math.prod(r["grid"]) < sms:
+            groups[(r["name"], r["grid"])].append(r)
+    found = sorted(((sum(r["alone"] for r in rs) / steps / 1e3, k, rs) for k, rs in groups.items()), key=lambda x: -x[0])
+    found = [f for f in found if f[0] >= 0.05]
+    emit(f"## Launches with fewer blocks than SMs ({sms})\n")
+    if not found:
+        emit("None above 0.05 ms per step of time alone.\n")
+        return
+    emit(f"{sum(f[0] for f in found):.2f} ms per step in launches that cannot use every SM and run alone.\n")
+    emit("| kernel | grid | blocks | launches/step | median us | ms/step | alone ms/step | streams | GB/s |")
+    emit("|---|---|---|---|---|---|---|---|---|")
+    for _, (name, grid), rs in found[:15]:
+        ms = sum(r["us"] for r in rs) / steps / 1e3
+        w = Counter(group_name(r["weights"][0]["name"]) for r in rs if r["weights"])
+        streams = f"`{w.most_common(1)[0][0]}`" if w else ""
+        nbytes, us = sum(r["weight_bytes"] for r in rs), sum(r["us"] for r in rs)
+        gbps = f"{nbytes / us / 1e3:.0f}" if nbytes >= len(rs) << 20 else ""
+        emit(f"| `{short(pretty[name], 60)}` | {list(grid)} | {math.prod(grid)} | {len(rs) / steps:.1f} | "
+             f"{statistics.median(r['us'] for r in rs):.1f} | {ms:.2f} | {sum(r['alone'] for r in rs) / steps / 1e3:.2f} | "
+             f"{streams} | {gbps} |")
+    emit("")
+
+
+def compute(rows, steps, ceiling, peaks, run, emit):
+    """Weight-streaming launches against both ceilings: bytes at the bandwidth ceiling and FLOPs at the
+    measured peak of their precision. The larger floor says what bounds the launch."""
+    groups = defaultdict(list)
+    for r in rows:
+        if r["weight_bytes"] >= 1 << 20:
+            cls, m, flops = gemm_flops(r, run)
+            groups[(weight_key(r), cls, m)].append((r, flops))
+    emit("## Compute\n")
+    emit("M is the tokens of the forward pass (" + ", ".join(f"{k} {v:.0f} TFLOP/s" for k, v in peaks.items()) + ").\n")
+    emit("| weight | precision | M | GFLOP | avg us | TFLOP/s | memory floor us | compute floor us | bound |")
+    emit("|---|---|---|---|---|---|---|---|---|")
+    floor_mem = floor_both = 0.0
+    lines = []
+    for ((name, _shape, _dtype), cls, m), items in groups.items():
+        t = statistics.mean(r["us"] for r, _ in items)
+        b = statistics.mean(r["weight_bytes"] for r, _ in items)
+        f = statistics.mean(fl for _, fl in items)
+        mem_us = b / ceiling / 1e3
+        comp_us = f / peaks[cls] / 1e6 if cls in peaks else None
+        floor_mem += mem_us * len(items) / steps
+        floor_both += max(mem_us, comp_us or 0) * len(items) / steps
+        bound = f"no {cls} peak" if comp_us is None else "compute" if comp_us > mem_us else "memory"
+        lines.append((t * len(items), f"| `{name}` | {cls} | {m} | {f / 1e9:.2f} | {t:.1f} | {f / t / 1e6:.1f} | "
+                                     f"{mem_us:.1f} | {'' if comp_us is None else f'{comp_us:.1f}'} | {bound} |"))
+    for _, line in sorted(lines, key=lambda x: -x[0]):
+        emit(line)
+    emit(f"\nFloor of the weight-streaming launches: {floor_mem / 1e3:.2f} ms per step from bandwidth alone, "
+         f"{floor_both / 1e3:.2f} ms with compute.\n")
+
+
+def parse_peaks(text):
+    return {k: float(v) for k, v in (kv.split("=") for kv in text.split(","))} if text else None
 
 
 def main():
@@ -324,10 +486,12 @@ def main():
     ap.add_argument("capture")
     ap.add_argument("--ceiling-gbps", type=float, required=True, help="measured DRAM read bandwidth")
     ap.add_argument("--steps", type=int, default=None, help="steps in range (default: run.json)")
+    ap.add_argument("--peak-tflops", default=None, help="measured peaks per precision, e.g. fp8=200,bf16=100,fp4=400")
+    ap.add_argument("--sms", type=int, default=None, help="SM count (default: run.json)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     steps = a.steps or json.load(open(os.path.join(a.capture, "run.json")))["steps"]
-    report(a.capture, a.ceiling_gbps, steps, a.out)
+    report(a.capture, a.ceiling_gbps, steps, a.out, parse_peaks(a.peak_tflops), a.sms)
 
 
 if __name__ == "__main__":
