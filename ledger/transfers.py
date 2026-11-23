@@ -17,7 +17,7 @@ import os
 import sys
 from collections import defaultdict
 
-from ledger.analyze import Memory, group_name, load, read_jsonl
+from ledger.analyze import group_name, load, read_jsonl
 
 # CUPTI_ACTIVITY_MEMCPY_KIND_* and CUPTI_ACTIVITY_MEMORY_KIND_*
 COPY_KINDS = {1: "HtoD", 2: "DtoH", 3: "HtoA", 4: "AtoH", 5: "AtoA", 6: "AtoD", 7: "DtoA", 8: "DtoD", 9: "HtoH", 10: "PtoP"}
