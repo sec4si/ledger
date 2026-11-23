@@ -124,6 +124,8 @@ def main():
     ap.add_argument("--ceiling-gbps", type=float, default=0)
     ap.add_argument("--cubins", help="directory of the program's cubins: show the SASS of dead stores")
     ap.add_argument("--out")
+    ap.add_argument("--masks-out", help="save what each launch position of each resolved step wrote and what of it "
+                    "was dead (sub-block masks, .npz) for ledger.dead_across")
     args = ap.parse_args()
 
     meta, shift, lid, kind, gran, mask, pcs = load_access(args.access)
@@ -237,6 +239,7 @@ def main():
         if not p["dead"] and p["readers"] == {nxt}:
             handoff[(position.get(p["w"]), position.get(nxt))] += popcount(p["m0"]) * sub_bytes
 
+    masks = [] if args.masks_out else None  # (launch, granule, sub-block mask, 0 written | 1 dead)
     for s, e in zip(starts.tolist(), ends.tolist()):
         g = int(gran[s])
         addr = g << shift
@@ -268,6 +271,8 @@ def main():
                     if hit and p["w"] != L:
                         nbytes = popcount(hit) * sub_bytes
                         dead[p["w"]] += nbytes
+                        if masks is not None:
+                            masks.append((p["w"], g, hit, 1))
                         p["dead"] += nbytes
                         if step_of.get(p["w"], full) < full:
                             dead_by_region[A.group_name(region)] += nbytes
@@ -276,6 +281,8 @@ def main():
                                 dead_by_pc[(fn, p["pc"] - by_id[p["w"]]["pc"])] += nbytes
                         p["un"] &= ~m
                 written[L] += popcount(m) * sub_bytes
+                if masks is not None:
+                    masks.append((L, g, m, 0))
                 pending.append({"w": L, "m0": m, "un": m, "readers": set(), "dead": 0, "pc": int(pcs[j])})
             for p in pending:
                 if not p["un"]:
@@ -284,6 +291,11 @@ def main():
         for p in pending:
             open_[p["w"]] += popcount(p["un"]) * sub_bytes
 
+    if masks is not None:
+        rows = [(step_of[L], position[L], g, m, d) for L, g, m, d in masks if L in position and step_of[L] < full]
+        a = np.array(rows, dtype=np.int64).reshape(-1, 5)
+        np.savez_compressed(args.masks_out, step=a[:, 0], position=a[:, 1], granule=a[:, 2], mask=a[:, 3],
+                            dead=a[:, 4], names=np.array([names[i] for i in steps[0]]), shift=shift, steps=full)
     print(f"opaque launches: {len(blind_launches)} ({sum(1 for i in blind_launches if seen[i])} partly seen), "
           f"without parameters: {len(wild)}", file=__import__("sys").stderr)
     report(args, steps, full, names, label, position, durations, written, dead, live, open_, dead_by_region,
