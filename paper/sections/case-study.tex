@@ -218,9 +218,7 @@ GSM8K, 200 questions, greedy & 0.975 & 0.975 & \\
 \subsection{A prediction from the books: smaller draft heads}\label{sec:drafthead}
 
 The books also price the repeated \texttt{lm\_head} reads: each draft step streams the full
-248k-vocabulary head, 5.6\,ms, 16.8\,ms per step for the three. Drafts only propose tokens and the
-main model checks them, so a draft head over part of the vocabulary can cost acceptance but never
-correctness. We tried this in a replay of the vLLM recording (the same kernels at the same
+248k-vocabulary head, 5.6\,ms, 16.8\,ms per step for the three. Drafts only propose tokens and the main model checks them, so a draft head over part of the vocabulary can cost acceptance but never correctness. This is not a new idea: FR-Spec restricts drafting to a static list of frequent tokens~\cite{zhao2025frspec}, and the same has been proposed for MTP drafters in vLLM~\cite{vllmissue58578,vllmissue67220}. What we test here is the books' prediction of what it saves. We tried it in a replay of the vLLM recording (the same kernels at the same
 addresses), replacing the drafts' \texttt{lm\_head} GEMM with an FP8 GEMV over the first 32\,768
 token ids and filling the other columns with $-\infty$. This change exists only in the replay; it
 is not part of vLLM.
@@ -246,9 +244,9 @@ fill (\cref{tab:drafthead}). Greedy output is identical, as it must be, and acce
 little where the best draft lies outside the first 32\,768 ids, for a net gain of 9\% in greedy and
 13\% in sampled decoding. Choosing the rows by token frequency in GSM8K, Python sources and English
 documentation did no better. The measurement covers one English prompt at batch 1; the low ids
-are mostly English pieces, so other languages may lose more acceptance, and larger batches were
-not measured. vLLM's EAGLE-3 drafts already map a small draft vocabulary onto the target's; the
-MTP drafts share the full head.
+are mostly English pieces, so other languages may lose more acceptance, and larger batches were not measured. Upstream measurements confirm the concern: a static 32k
+list loses 33\% of the acceptance length on multilingual prompts, and choosing additional rows per
+draft token from the hidden state wins most of it back~\cite{vllmissue67220}.
 
 \subsection{What \sys{} reports}
 
