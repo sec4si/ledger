@@ -126,7 +126,12 @@ def load(capture):
     mem = Memory(regions)
     nodes = {r["id"]: r for r in read_jsonl(os.path.join(capture, "nodes-*.jsonl"))}
     clones = {r["id"]: r["orig"] for r in read_jsonl(os.path.join(capture, "clones-*.jsonl"))}
-    direct = {r["corr"]: r for r in read_jsonl(os.path.join(capture, "launches-*.jsonl"))}
+    # A runtime launch reaches both the runtime and the driver callback with one correlation id;
+    # keep the record that carries the parameters.
+    direct = {}
+    for r in read_jsonl(os.path.join(capture, "launches-*.jsonl")):
+        if r["params"] or r["corr"] not in direct:
+            direct[r["corr"]] = r
     kernels = sorted(read_jsonl(os.path.join(capture, "kernels-*.jsonl")), key=lambda k: k["start"])
     return mem, nodes, clones, direct, kernels
 
