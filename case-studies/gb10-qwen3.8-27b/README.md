@@ -210,8 +210,11 @@ The step loses 14.3 ms of the 16.8 the ledger predicted; the rest is the GEMV an
 Greedy decoding loses some acceptance where the best draft is outside the first 32,768 ids. Choosing
 the rows by frequency in GSM8K, Python sources and English documentation did no better (2.76 and
 2.43 tokens per step); a corpus closer to what the model writes may. Not measured: other languages
-(the low ids are mostly English pieces), larger batches. vLLM's EAGLE-3 drafts already map a small
-draft vocabulary onto the target's; the MTP drafts share the full head.
+(the low ids are mostly English pieces), larger batches. This is the static token list of FR-Spec
+(vllm-project/vllm#58578). Upstream work on MTP drafts goes further
+([vllm-project/vllm#67220](https://github.com/vllm-project/vllm/issues/67220)): a static 32k list
+there loses 33% of the acceptance length on multilingual prompts, and rows picked per draft token
+from a low-rank projection of the head win most of it back.
 
 ## Reproduce
 
