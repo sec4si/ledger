@@ -33,6 +33,13 @@ concurrency 4 / 8 on that machine; it is upstream as
 with the measurements and the scripts to reproduce them, is in
 [`case-studies/gb10-qwen3.8-27b`](case-studies/gb10-qwen3.8-27b).
 
+On the same machine, Qwen3-30B-A3B FP8 (a mixture of experts) writes almost nothing for nothing, and its
+expert GEMMs read exactly the eight routed experts per layer, but at 60-66% of the bandwidth ceiling.
+vLLM picks DeepGEMM for block FP8 MoE on SM12x; its Triton backend is faster there, by 18-44% in serving
+throughput at concurrency 1-8 with unchanged GSM8K accuracy. The change is proposed as
+[vllm-project/vllm#69355](https://github.com/vllm-project/vllm/pull/69355); the case study is in
+[`case-studies/gb10-qwen3-30b-a3b`](case-studies/gb10-qwen3-30b-a3b).
+
 ## Use
 
 Build the capture library against the CUDA toolkit of the target machine:
