@@ -12,5 +12,11 @@ patches.fatbin: patches.cu access.h
 	$(CUDA)/bin/nvcc --fatbin --compile-as-tools-patch -O3 -I$(SANITIZER)/include \
 		-gencode arch=compute_$(ARCH),code=sm_$(ARCH) -o $@ -c $<
 
+selftest: selftest.cu
+	$(CUDA)/bin/nvcc -O2 -arch=sm_$(ARCH) -o $@ $<
+
+selftest_tma: selftest_tma.cu
+	$(CUDA)/bin/nvcc -O2 -arch=sm_$(ARCH) -o $@ $< -lcuda
+
 clean:
-	rm -f libledger_access.so patches.fatbin
+	rm -f libledger_access.so patches.fatbin selftest selftest_tma

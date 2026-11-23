@@ -7,8 +7,16 @@
 //
 // The window is the profiling range (cudaProfilerStart/Stop), as in the capture library, or is
 // counted in graph launches with LEDGER_GRAPH_WINDOW=<skip>:<take>.
-// Tensor-map copies (cp.async.bulk.tensor, TMA) are not instrumented by the Sanitizer API; a launch
-// that moves data only that way shows no accesses here.
+//
+// The Sanitizer API gives every node of a CUDA graph the callback data of the last one, so accesses
+// inside a graph cannot be told apart. The tracer keeps a copy of each graph as it is instantiated and,
+// when the program launches it, launches its nodes one by one on the same stream instead, then an empty
+// graph in its place.
+//
+// Tensor-map copies (cp.async.bulk.tensor, TMA) are not instrumented by the Sanitizer API. The tracer
+// finds the tensor maps among a launch's parameters, takes the launch to read every tensor they span,
+// and finds what it wrote by comparing those tensors before and after it: a lower bound, since a write
+// of the value already there does not show.
 //
 // Environment:
 //   LEDGER_OUT              output directory (default ./ledger-out)
@@ -22,9 +30,13 @@
 //   LEDGER_ACCESS_GRANULE   log2 of the granule size in bytes (default 10, at least 5)
 //   LEDGER_ACCESS_SLOTS     log2 of the granule table size (default 22)
 //   LEDGER_ACCESS_EVENTS    event log capacity (default 8388608)
+//   LEDGER_ACCESS_UNROLL    0: leave graphs alone (default 1, launch their nodes one by one)
+//   LEDGER_ACCESS_TMA_DIFF  most bytes of tensors compared around one tensor-map launch (default 1 GiB);
+//                           a launch over it, or with 0, gets "tma_partial"
 //
-// Launches made through the driver API also carry their parameters ("params": [[offset, size, hex], ...],
-// as in the capture library), so the analysis can follow the pointers of launches it cannot see into.
+// Launches also carry their parameters ("params": [[offset, size, hex], ...], as in the capture
+// library), so the analysis can follow the pointers of launches it cannot see into. Launches with
+// tensor maps carry "tma_reads" and "tma_writes" ([[begin, end], ...]; weights left out of the reads).
 //
 // Output, per process: access-<pid>.bin (event words, see access.h), access-masks-<pid>.bin (one uint32
 // sub-block mask per event), access-pcs-<pid>.bin (one uint64 PC per event; launches carry their
@@ -43,8 +55,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -82,20 +98,124 @@ std::string hex(const void* p, size_t n) {
   return out;
 }
 
-// "[[offset,size,hex],...]" of a launch, or empty when the layout or the values are unavailable.
-std::string param_json(CUfunction f, void** params) {
-  if (!f || !params) return "";
-  std::string out = "[";
+// The tracer's own driver calls (synchronize, copy, graph queries) re-enter the callback; it ignores them.
+thread_local int internal = 0;
+struct Internal {
+  Internal() { ++internal; }
+  ~Internal() { --internal; }
+  Internal(const Internal&) = delete;
+  Internal& operator=(const Internal&) = delete;
+};
+
+struct Param {
+  size_t off, size;
+  const unsigned char* bytes;
+};
+
+std::vector<Param> params_of(CUfunction f, void** params) {
+  std::vector<Param> out;
+  if (!f || !params) return out;
+  Internal in;
   for (size_t i = 0;; ++i) {
     size_t off = 0, size = 0;
     if (cuFuncGetParamInfo(f, i, &off, &size) != CUDA_SUCCESS &&
         cuKernelGetParamInfo(reinterpret_cast<CUkernel>(f), i, &off, &size) != CUDA_SUCCESS)
       break;
-    if (i) out += ",";
-    out += "[" + std::to_string(off) + "," + std::to_string(size) + ",\"" + hex(params[i], size) + "\"]";
+    out.push_back({off, size, static_cast<const unsigned char*>(params[i])});
   }
+  return out;
+}
+
+// "[[offset,size,hex],...]" of a launch, or empty when the layout or the values are unavailable.
+std::string param_json(const std::vector<Param>& ps) {
+  if (ps.empty()) return "";
+  std::string out = "[";
+  for (const Param& p : ps)
+    out += (out.size() > 1 ? ",[" : "[") + std::to_string(p.off) + "," + std::to_string(p.size) + ",\"" +
+           hex(p.bytes, p.size) + "\"]";
   return out + "]";
 }
+
+struct Span {
+  uint64_t b, e;
+};
+
+std::string spans_json(const std::vector<Span>& v) {
+  std::string out = "[";
+  for (const Span& s : v) out += (out.size() > 1 ? ",[" : "[") + std::to_string(s.b) + "," + std::to_string(s.e) + "]";
+  return out + "]";
+}
+
+std::vector<Span> merge_spans(std::vector<Span> v) {
+  std::sort(v.begin(), v.end(), [](const Span& a, const Span& b) { return a.b < b.b; });
+  std::vector<Span> out;
+  for (const Span& s : v) {
+    if (!out.empty() && s.b <= out.back().e)
+      out.back().e = std::max(out.back().e, s.e);
+    else
+      out.push_back(s);
+  }
+  return out;
+}
+
+// The bytes a tensor map spans, if the 128 bytes at m are one. The layout is the driver's for sm_90 to
+// sm_121, found by encoding maps with one parameter varied at a time: bytes 0-7 the global address;
+// byte 8 bit 0 im2col, bits 4-6 rank - 1; byte 8 bit 7 and byte 9 bits 0-2 a data-type code; u32 at
+// 12 + 4i the stride of dimension i + 1 in 16-byte units, its bits 32-35 in nibble i from byte 28;
+// u32 at 32 + 4i the size of dimension i, minus one; bytes 80 to 127 are zero.
+bool decode_map(const unsigned char* m, Span& out) {
+  static const unsigned bits[] = {8, 16, 32, 32, 64, 64, 16, 32, 32, 64, 16, 4, 4, 6};  // per type code
+  const auto u32 = [m](int o) {
+    uint32_t v;
+    memcpy(&v, m + o, 4);
+    return uint64_t{v};
+  };
+  uint64_t addr;
+  memcpy(&addr, m, 8);
+  const unsigned rank = ((m[8] >> 4) & 7) + 1, code = ((m[9] & 7) << 1) | (m[8] >> 7);
+  if (!addr || (addr & 15) || rank > 5 || code >= std::size(bits)) return false;
+  for (int i = 80; i < 128; ++i)
+    if (m[i]) return false;
+  uint64_t end = addr + ((u32(32) + 1) * bits[code] + 7) / 8;
+  for (unsigned i = 1; i < rank; ++i) {
+    const uint64_t high = (m[28 + (i - 1) / 2] >> ((i - 1) % 2 * 4)) & 15;
+    const uint64_t stride = (u32(12 + 4 * (i - 1)) | high << 32) << 4;  // 0 for a broadcast (batch) dimension
+    end += u32(32 + 4 * i) * stride;
+  }
+  out = {addr, end};
+  return true;
+}
+
+// The allocations covering the span from its start, cut where device memory ends: a map may be encoded
+// for more rows than its tensor holds, and a launch cannot touch memory that is not there. Empty when
+// the start is not device memory.
+std::vector<Span> on_device(const Span& sp) {
+  Internal in;
+  std::vector<Span> pieces;
+  for (uint64_t at = sp.b; at < sp.e;) {
+    CUdeviceptr base;
+    size_t size;
+    if (cuMemGetAddressRange(&base, &size, at) != CUDA_SUCCESS) break;
+    const uint64_t end = std::min<uint64_t>(sp.e, base + size);
+    pieces.push_back({at, end});
+    at = end;
+  }
+  return pieces;
+}
+
+void warn_copy(CUresult r) {
+  static bool warned = false;
+  if (!warned) fprintf(stderr, "ledger-access: pid %d cannot copy a tensor for comparison (%d)\n", getpid(), static_cast<int>(r));
+  warned = true;
+}
+
+// A launch with tensor maps: the tensors it may read, and copies of them from before it ran.
+struct TmaLaunch {
+  long id = -1;
+  std::vector<Span> reads, watched;
+  std::vector<std::vector<unsigned char>> before;
+  bool partial = false;  // a tensor left out of the comparison
+};
 
 struct State {
   std::recursive_mutex mu;  // synchronizing inside a callback re-enters the synchronize callback
@@ -112,6 +232,14 @@ struct State {
   bool active = false, dumped = false, ready = false;
   unsigned int shift = 10, slots_log2 = 22, log_cap = 1u << 23;
   std::vector<unsigned long long> skip_ranges;
+  std::vector<unsigned long long> weights;  // every weight, traced or not: tensor maps over them are only read
+  bool weights_loaded = false;
+  bool unroll = true;
+  std::unordered_map<CUgraphExec, CUgraph> sources;  // a copy of the graph behind each executable graph
+  CUgraphExec empty_graph = nullptr;
+  uint64_t tma_diff_max = 1ull << 30;
+  std::unique_ptr<TmaLaunch> tma_next, tma_wait;  // of the launch being made; of the last one made
+  std::map<unsigned int, std::string> extra;      // more fields of a launch record, by id
   CUcontext ctx = nullptr;
   Tables t{};
   Launch* d_launches = nullptr;  // kMaxLaunches + 1 entries; the last one is disabled
@@ -193,17 +321,35 @@ bool check(SanitizerResult r, const char* what) {
   return false;
 }
 
+// The weights, once the window opens (the capture library writes the regions file before that).
+void load_weights() {
+  State& s = S();
+  if (s.weights_loaded) return;
+  s.weights_loaded = true;
+  if (!s.skip_auto) {
+    s.weights = s.skip_ranges;
+    return;
+  }
+  const std::string path = s.out + "/regions-" + std::to_string(getpid()) + ".json";
+  const char* keep = getenv("LEDGER_ACCESS_TRACE_WEIGHTS");
+  s.skip_ranges = read_weight_regions(path, keep ? keep : "");
+  s.weights = read_weight_regions(path, "");
+  fprintf(stderr, "ledger-access: pid %d skips %zu weight ranges from its regions file\n", getpid(),
+          s.skip_ranges.size() / 2);
+}
+
+bool inside_weight(const Span& sp) {
+  const auto& w = S().weights;
+  const auto it = std::upper_bound(w.begin(), w.end(), sp.b);  // first bound past sp.b
+  return (it - w.begin()) % 2 == 1 && sp.e <= *it;
+}
+
 // Allocate and clear the tables in the context of the first window launch.
 bool prepare(CUcontext ctx, Sanitizer_StreamHandle stream) {
   State& s = S();
   if (s.ready) return true;
   s.ctx = ctx;
-  if (s.skip_auto) {
-    const char* keep = getenv("LEDGER_ACCESS_TRACE_WEIGHTS");
-    s.skip_ranges = read_weight_regions(s.out + "/regions-" + std::to_string(getpid()) + ".json", keep ? keep : "");
-    fprintf(stderr, "ledger-access: pid %d skips %zu weight ranges from its regions file\n", getpid(),
-            s.skip_ranges.size() / 2);
-  }
+  load_weights();
   const size_t slots = size_t{1} << s.slots_log2;
   void *keys, *cur, *log, *masks, *pcs, *counters, *skip, *launches;
   const size_t n_launch = kMaxLaunches + 1;
@@ -274,6 +420,264 @@ void on_copy(const char* name, const std::string& reads, const std::string& writ
                    ",\"writes\":" + writes + ",\"graph_launch\":" + std::to_string(s.current_graph_launch) + "}");
 }
 
+// At the entry of a launch: its tensor maps, and copies of the tensors it may write.
+void prepare_tma(const std::vector<Param>& ps, CUstream stream) {
+  State& s = S();
+  std::vector<Span> maps;
+  for (const Param& p : ps)
+    for (size_t k = (64 - p.off % 64) % 64; k + 128 <= p.size; k += 64) {
+      Span sp;
+      if (decode_map(p.bytes + k, sp))
+        for (const Span& piece : on_device(sp)) maps.push_back(piece);
+    }
+  if (maps.empty()) return;
+  load_weights();
+  auto t = std::make_unique<TmaLaunch>();
+  // Compared allocation by allocation: neighbouring allocations merge into a span no single copy may cross.
+  std::sort(maps.begin(), maps.end(), [](const Span& x, const Span& y) { return x.b != y.b ? x.b < y.b : x.e < y.e; });
+  maps.erase(std::unique(maps.begin(), maps.end(), [](const Span& x, const Span& y) { return x.b == y.b && x.e == y.e; }),
+             maps.end());
+  maps.erase(std::remove_if(maps.begin(), maps.end(), inside_weight), maps.end());
+  uint64_t total = 0;
+  for (const Span& m : maps) total += m.e - m.b;
+  t->reads = merge_spans(maps);
+  Internal in;
+  CUstreamCaptureStatus capture = CU_STREAM_CAPTURE_STATUS_NONE;
+  cuStreamIsCapturing(stream, &capture);
+  if (total > s.tma_diff_max || capture != CU_STREAM_CAPTURE_STATUS_NONE) {
+    t->partial = !maps.empty();
+  } else if (!maps.empty()) {
+    cuCtxSynchronize();
+    for (const Span& r : maps) {
+      std::vector<unsigned char> b(r.e - r.b);
+      if (const CUresult e = cuMemcpyDtoH(b.data(), r.b, b.size()); e != CUDA_SUCCESS) {
+        warn_copy(e);
+        t->partial = true;
+        continue;
+      }
+      t->watched.push_back(r);
+      t->before.push_back(std::move(b));
+    }
+  }
+  s.tma_next = std::move(t);
+}
+
+// The last tensor-map launch has finished by the time the program makes its next call: what changed.
+void resolve_tma() {
+  State& s = S();
+  if (!s.tma_wait) return;
+  const std::unique_ptr<TmaLaunch> t = std::move(s.tma_wait);
+  std::vector<Span> writes;
+  Internal in;
+  cuCtxSynchronize();
+  for (size_t i = 0; i < t->watched.size(); ++i) {
+    const Span& r = t->watched[i];
+    std::vector<unsigned char> after(r.e - r.b);
+    if (const CUresult e = cuMemcpyDtoH(after.data(), r.b, after.size()); e != CUDA_SUCCESS) {
+      warn_copy(e);
+      t->partial = true;
+      continue;
+    }
+    for (size_t o = 0; o < after.size(); o += 32) {
+      const size_t n = std::min<size_t>(32, after.size() - o);
+      if (!memcmp(after.data() + o, t->before[i].data() + o, n)) continue;
+      if (!writes.empty() && writes.back().e == r.b + o)
+        writes.back().e += n;
+      else
+        writes.push_back({r.b + o, r.b + o + n});
+    }
+  }
+  s.extra[t->id] = ",\"tma_reads\":" + spans_json(t->reads) + ",\"tma_writes\":" + spans_json(merge_spans(writes)) +
+                   (t->partial ? ",\"tma_partial\":true" : "");
+}
+
+// Parameters of the instantiate calls, which all start alike (generated_cuda_meta.h).
+struct InstantiateParams {
+  CUgraphExec* exec;
+  CUgraph graph;
+};
+
+bool is_instantiate(Sanitizer_CallbackId cbid) {
+  return cbid == SANITIZER_CBID_DRIVER_API_cuGraphInstantiate || cbid == SANITIZER_CBID_DRIVER_API_cuGraphInstantiate_v2 ||
+         cbid == SANITIZER_CBID_DRIVER_API_cuGraphInstantiateWithFlags ||
+         cbid == SANITIZER_CBID_DRIVER_API_cuGraphInstantiateWithParams ||
+         cbid == SANITIZER_CBID_DRIVER_API_cuGraphInstantiateWithParams_ptsz;
+}
+
+// Keep a copy of the graph: the program may destroy it once instantiated.
+void on_instantiated(const Sanitizer_CallbackData* cb) {
+  State& s = S();
+  if (!s.unroll || *static_cast<const CUresult*>(cb->functionReturnValue) != CUDA_SUCCESS) return;
+  auto* p = static_cast<const InstantiateParams*>(cb->functionParams);
+  Internal in;
+  CUgraph copy;
+  if (cuGraphClone(&copy, p->graph) != CUDA_SUCCESS) return;
+  std::lock_guard<std::recursive_mutex> lock(s.mu);
+  CUgraph& slot = s.sources[*p->exec];
+  if (slot) cuGraphDestroy(slot);
+  slot = copy;
+}
+
+void forget(CUgraphExec exec) {
+  State& s = S();
+  const auto it = s.sources.find(exec);
+  if (it == s.sources.end()) return;
+  Internal in;
+  cuGraphDestroy(it->second);
+  s.sources.erase(it);
+}
+
+// The nodes of a graph in an order its edges allow: of the ready nodes, the first added runs first.
+std::vector<CUgraphNode> node_order(CUgraph g) {
+  Internal in;
+  size_t n = 0, m = 0;
+  cuGraphGetNodes(g, nullptr, &n);
+  std::vector<CUgraphNode> nodes(n);
+  cuGraphGetNodes(g, nodes.data(), &n);
+  cuGraphGetEdges(g, nullptr, nullptr, nullptr, &m);
+  std::vector<CUgraphNode> from(m), to(m);
+  std::vector<CUgraphEdgeData> data(m);
+  cuGraphGetEdges(g, from.data(), to.data(), data.data(), &m);
+  std::unordered_map<CUgraphNode, size_t> index;
+  for (size_t i = 0; i < n; ++i) index[nodes[i]] = i;
+  std::vector<size_t> waiting(n);
+  std::vector<std::vector<size_t>> next(n);
+  for (size_t e = 0; e < m; ++e) {
+    next[index[from[e]]].push_back(index[to[e]]);
+    ++waiting[index[to[e]]];
+  }
+  std::set<size_t> ready;
+  for (size_t i = 0; i < n; ++i)
+    if (!waiting[i]) ready.insert(i);
+  std::vector<CUgraphNode> order;
+  while (!ready.empty()) {
+    const size_t i = *ready.begin();
+    ready.erase(ready.begin());
+    order.push_back(nodes[i]);
+    for (size_t j : next[i])
+      if (!--waiting[j]) ready.insert(j);
+  }
+  return order;
+}
+
+bool run_graph(CUgraph g, CUstream stream, bool run);
+
+// Issue one node on the stream (or, with run false, only check that it can be).
+bool run_node(CUgraphNode node, CUstream stream, bool run) {
+  CUgraphNodeType type;
+  {
+    Internal in;
+    if (cuGraphNodeGetType(node, &type) != CUDA_SUCCESS) return false;
+  }
+  switch (type) {
+    case CU_GRAPH_NODE_TYPE_EMPTY:
+      return true;
+    case CU_GRAPH_NODE_TYPE_KERNEL: {
+      if (!run) return true;
+      CUDA_KERNEL_NODE_PARAMS p{};
+      CUlaunchAttribute attrs[2];
+      unsigned int n_attrs = 0;
+      {
+        Internal in;
+        if (cuGraphKernelNodeGetParams(node, &p) != CUDA_SUCCESS) return false;
+        if (!p.func && p.kern && cuKernelGetFunction(&p.func, p.kern) != CUDA_SUCCESS) return false;
+        CUlaunchAttributeValue v{};
+        if (cuGraphKernelNodeGetAttribute(node, CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION, &v) == CUDA_SUCCESS &&
+            v.clusterDim.x * v.clusterDim.y * v.clusterDim.z > 1)
+          attrs[n_attrs++] = {CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION, {}, v};
+        v = {};
+        if (cuGraphKernelNodeGetAttribute(node, CU_LAUNCH_ATTRIBUTE_COOPERATIVE, &v) == CUDA_SUCCESS && v.cooperative)
+          attrs[n_attrs++] = {CU_LAUNCH_ATTRIBUTE_COOPERATIVE, {}, v};
+      }
+      CUlaunchConfig c{p.gridDimX, p.gridDimY,      p.gridDimZ, p.blockDimX, p.blockDimY,
+                       p.blockDimZ, p.sharedMemBytes, stream,     attrs,       n_attrs};
+      return cuLaunchKernelEx(&c, p.func, p.kernelParams, p.extra) == CUDA_SUCCESS;
+    }
+    case CU_GRAPH_NODE_TYPE_MEMSET: {
+      CUDA_MEMSET_NODE_PARAMS p{};
+      {
+        Internal in;
+        if (cuGraphMemsetNodeGetParams(node, &p) != CUDA_SUCCESS) return false;
+      }
+      if (!run) return true;
+      const size_t pitch = p.pitch ? p.pitch : p.width * p.elementSize;
+      if (p.elementSize == 1) return cuMemsetD2D8Async(p.dst, pitch, static_cast<unsigned char>(p.value), p.width, p.height, stream) == CUDA_SUCCESS;
+      if (p.elementSize == 2) return cuMemsetD2D16Async(p.dst, pitch, static_cast<unsigned short>(p.value), p.width, p.height, stream) == CUDA_SUCCESS;
+      return cuMemsetD2D32Async(p.dst, pitch, p.value, p.width, p.height, stream) == CUDA_SUCCESS;
+    }
+    case CU_GRAPH_NODE_TYPE_MEMCPY: {
+      CUDA_MEMCPY3D p{};
+      {
+        Internal in;
+        if (cuGraphMemcpyNodeGetParams(node, &p) != CUDA_SUCCESS) return false;
+      }
+      return !run || cuMemcpy3DAsync(&p, stream) == CUDA_SUCCESS;
+    }
+    case CU_GRAPH_NODE_TYPE_EVENT_RECORD:
+    case CU_GRAPH_NODE_TYPE_WAIT_EVENT: {
+      CUevent ev;
+      {
+        Internal in;
+        if ((type == CU_GRAPH_NODE_TYPE_EVENT_RECORD ? cuGraphEventRecordNodeGetEvent(node, &ev)
+                                                      : cuGraphEventWaitNodeGetEvent(node, &ev)) != CUDA_SUCCESS)
+          return false;
+      }
+      if (!run) return true;
+      return (type == CU_GRAPH_NODE_TYPE_EVENT_RECORD ? cuEventRecord(ev, stream) : cuStreamWaitEvent(stream, ev, 0)) ==
+             CUDA_SUCCESS;
+    }
+    case CU_GRAPH_NODE_TYPE_HOST: {
+      CUDA_HOST_NODE_PARAMS p{};
+      {
+        Internal in;
+        if (cuGraphHostNodeGetParams(node, &p) != CUDA_SUCCESS) return false;
+      }
+      return !run || cuLaunchHostFunc(stream, p.fn, p.userData) == CUDA_SUCCESS;
+    }
+    case CU_GRAPH_NODE_TYPE_GRAPH: {
+      CUgraph child;
+      {
+        Internal in;
+        if (cuGraphChildGraphNodeGetGraph(node, &child) != CUDA_SUCCESS) return false;
+      }
+      return run_graph(child, stream, run);
+    }
+    default:
+      return false;  // memory allocation, conditional, external semaphore and batch nodes
+  }
+}
+
+bool run_graph(CUgraph g, CUstream stream, bool run) {
+  for (CUgraphNode node : node_order(g))
+    if (!run_node(node, stream, run)) return false;
+  return true;
+}
+
+// At the entry of cuGraphLaunch: launch the graph's nodes one by one, then let the call launch an
+// empty graph.
+void unroll(const Sanitizer_CallbackData* cb) {
+  State& s = S();
+  auto* p = static_cast<GraphLaunchParams*>(const_cast<void*>(cb->functionParams));
+  const auto it = s.sources.find(p->hGraph);
+  if (!s.unroll || s.dumped || it == s.sources.end()) return;
+  if (!run_graph(it->second, p->hStream, false)) {
+    static bool warned = false;
+    if (!warned) fprintf(stderr, "ledger-access: pid %d a graph holds nodes that cannot run one by one; left whole\n", getpid());
+    warned = true;
+    return;
+  }
+  if (!s.empty_graph) {
+    Internal in;
+    CUgraph g;
+    cuGraphCreate(&g, 0);
+    cuGraphInstantiateWithFlags(&s.empty_graph, g, 0);
+    cuGraphDestroy(g);
+  }
+  if (!run_graph(it->second, p->hStream, true))
+    fprintf(stderr, "ledger-access: pid %d a graph node failed to launch on its own\n", getpid());
+  p->hGraph = s.empty_graph;
+}
+
 void on_launch(const Sanitizer_LaunchData& d, bool graph) {
   State& s = S();
   std::lock_guard<std::recursive_mutex> lock(s.mu);
@@ -289,6 +693,10 @@ void on_launch(const Sanitizer_LaunchData& d, bool graph) {
                      (graph ? "true" : "false") + ",\"graph_launch\":" + std::to_string(s.current_graph_launch) +
                      ",\"pc\":" + std::to_string(function_pc(d.module, d.functionName)) +
                      (!graph && !s.pending_params.empty() ? ",\"params\":" + s.pending_params : std::string()) + "}");
+    if (!graph && s.tma_next) {
+      s.tma_wait = std::move(s.tma_next);
+      s.tma_wait->id = id;
+    }
   } else if (s.ready) {
     data = s.d_launches + kMaxLaunches;
   }
@@ -299,6 +707,7 @@ void on_launch(const Sanitizer_LaunchData& d, bool graph) {
 void dump(Sanitizer_StreamHandle stream) {
   State& s = S();
   if (s.dumped || !s.ready) return;
+  resolve_tma();
   s.dumped = true;
   unsigned int counters[8] = {};
   check(sanitizerMemcpyDeviceToHost(counters, s.t.counters, 32, stream), "read counters");
@@ -326,7 +735,14 @@ void dump(Sanitizer_StreamHandle stream) {
     fclose(f);
   }
   if (FILE* f = fopen((s.out + "/access-launches-" + pid + ".jsonl").c_str(), "w")) {
-    for (const auto& line : s.meta) fprintf(f, "%s\n", line.c_str());
+    for (size_t i = 0; i < s.meta.size(); ++i) {  // meta[i] is the record of id i
+      const auto x = s.extra.find(static_cast<unsigned int>(i));
+      const std::string& line = s.meta[i];
+      if (x == s.extra.end())
+        fprintf(f, "%s\n", line.c_str());
+      else
+        fprintf(f, "%s%s}\n", line.substr(0, line.size() - 1).c_str(), x->second.c_str());
+    }
     fclose(f);
   }
   if (FILE* f = fopen((s.out + "/access-meta-" + pid + ".json").c_str(), "w")) {
@@ -353,6 +769,7 @@ void patch_module(CUmodule module, CUcontext ctx) {
 
 void SANITIZERAPI callback(void*, Sanitizer_CallbackDomain domain, Sanitizer_CallbackId cbid, const void* data) {
   State& s = S();
+  if (internal && domain != SANITIZER_CB_DOMAIN_RESOURCE && domain != SANITIZER_CB_DOMAIN_LAUNCH) return;
   switch (domain) {
     case SANITIZER_CB_DOMAIN_RESOURCE:
       if (cbid == SANITIZER_CBID_RESOURCE_MODULE_LOADED) {
@@ -362,15 +779,35 @@ void SANITIZERAPI callback(void*, Sanitizer_CallbackDomain domain, Sanitizer_Cal
       break;
     case SANITIZER_CB_DOMAIN_DRIVER_API: {
       auto* cb = static_cast<const Sanitizer_CallbackData*>(data);
-      if (cb->callbackSite != SANITIZER_API_ENTER) break;
+      if (cb->callbackSite != SANITIZER_API_ENTER) {
+        if (is_instantiate(cbid)) on_instantiated(cb);
+        break;
+      }
       std::lock_guard<std::recursive_mutex> lock(s.mu);
-      if (s.active && (cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel || cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel_ptsz)) {
+      resolve_tma();
+      s.tma_next.reset();
+      const bool launch = cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel || cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel_ptsz;
+      const bool launch_ex = cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx || cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx_ptsz;
+      const bool graph_launch = cbid == SANITIZER_CBID_DRIVER_API_cuGraphLaunch || cbid == SANITIZER_CBID_DRIVER_API_cuGraphLaunch_ptsz;
+      CUstream stream = nullptr;
+      if (launch) {
         auto* p = static_cast<const LaunchKernelParams*>(cb->functionParams);
-        s.pending_params = param_json(p->f, p->kernelParams);
-      } else if (s.active && (cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx ||
-                              cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx_ptsz)) {
+        stream = p->hStream;
+        if (s.active) {
+          const auto ps = params_of(p->f, p->kernelParams);
+          s.pending_params = param_json(ps);
+          prepare_tma(ps, stream);
+        }
+      } else if (launch_ex) {
         auto* p = static_cast<const LaunchKernelExParams*>(cb->functionParams);
-        s.pending_params = param_json(p->f, p->kernelParams);
+        stream = p->config->hStream;
+        if (s.active) {
+          const auto ps = params_of(p->f, p->kernelParams);
+          s.pending_params = param_json(ps);
+          prepare_tma(ps, stream);
+        }
+      } else if (cbid == SANITIZER_CBID_DRIVER_API_cuGraphExecDestroy) {
+        forget(*static_cast<const CUgraphExec*>(cb->functionParams));
       }
       if (s.profiler_range) {
         if (cbid == SANITIZER_CBID_DRIVER_API_cuProfilerStart) {
@@ -381,46 +818,40 @@ void SANITIZERAPI callback(void*, Sanitizer_CallbackDomain domain, Sanitizer_Cal
           s.active = false;
           fprintf(stderr, "ledger-access: pid %d profiler range closes\n", getpid());
           Sanitizer_StreamHandle h = nullptr;
-          cuCtxSynchronize();
+          {
+            Internal in;
+            cuCtxSynchronize();
+          }
           if (s.ready && check(sanitizerGetStreamHandle(cb->context, nullptr, &h), "stream handle")) dump(h);
         }
-        break;
-      }
-      if (!s.anchor.empty()) {
-        if (!s.dump_pending || s.dumped) break;
-        CUstream stream = nullptr;
-        if (cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel || cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernel_ptsz)
-          stream = static_cast<const LaunchKernelParams*>(cb->functionParams)->hStream;
-        else if (cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx || cbid == SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx_ptsz)
-          stream = static_cast<const LaunchKernelExParams*>(cb->functionParams)->config->hStream;
-        else
-          break;
+      } else if (!s.anchor.empty()) {
         Sanitizer_StreamHandle h = nullptr;
-        if (check(sanitizerGetStreamHandle(cb->context, stream, &h), "stream handle")) {
+        if (s.dump_pending && !s.dumped && (launch || launch_ex) &&
+            check(sanitizerGetStreamHandle(cb->context, stream, &h), "stream handle")) {
           check(sanitizerStreamSynchronize(h), "synchronize");
           dump(h);
         }
-        break;
-      }
-      if (cbid != SANITIZER_CBID_DRIVER_API_cuGraphLaunch && cbid != SANITIZER_CBID_DRIVER_API_cuGraphLaunch_ptsz) break;
-      const long n = s.graph_launches++;
-      s.current_graph_launch = n;
-      if (n == s.skip || n == s.skip + s.take)
-        fprintf(stderr, "ledger-access: pid %d graph launch %ld, window %s\n", getpid(), n,
-                n == s.skip ? "opens" : "closes");
-      if (n == s.skip) s.active = true;
-      if (n == s.skip + s.take) s.active = false;
-      // The program may wait for its results without a synchronize call (polling mapped memory),
-      // so do not count on a synchronize callback: two graph launches after the window, drain the
-      // stream and write the log.
-      if (n == s.skip + s.take + 2 && s.ready) {
-        Sanitizer_StreamHandle h = nullptr;
-        auto* p = static_cast<const GraphLaunchParams*>(cb->functionParams);
-        if (check(sanitizerGetStreamHandle(cb->context, p->hStream, &h), "stream handle")) {
-          sanitizerStreamSynchronize(h);
-          dump(h);
+      } else if (graph_launch) {
+        const long n = s.graph_launches++;
+        s.current_graph_launch = n;
+        if (n == s.skip || n == s.skip + s.take)
+          fprintf(stderr, "ledger-access: pid %d graph launch %ld, window %s\n", getpid(), n,
+                  n == s.skip ? "opens" : "closes");
+        if (n == s.skip) s.active = true;
+        if (n == s.skip + s.take) s.active = false;
+        // The program may wait for its results without a synchronize call (polling mapped memory),
+        // so do not count on a synchronize callback: two graph launches after the window, drain the
+        // stream and write the log.
+        if (n == s.skip + s.take + 2 && s.ready) {
+          Sanitizer_StreamHandle h = nullptr;
+          auto* p = static_cast<const GraphLaunchParams*>(cb->functionParams);
+          if (check(sanitizerGetStreamHandle(cb->context, p->hStream, &h), "stream handle")) {
+            sanitizerStreamSynchronize(h);
+            dump(h);
+          }
         }
       }
+      if (graph_launch) unroll(cb);
       break;
     }
     case SANITIZER_CB_DOMAIN_LAUNCH:
@@ -477,6 +908,8 @@ int init() {
   if (const char* v = getenv("LEDGER_ACCESS_GRANULE")) s.shift = static_cast<unsigned int>(atoi(v));
   if (const char* v = getenv("LEDGER_ACCESS_SLOTS")) s.slots_log2 = static_cast<unsigned int>(atoi(v));
   if (const char* v = getenv("LEDGER_ACCESS_EVENTS")) s.log_cap = static_cast<unsigned int>(atoll(v));
+  if (const char* v = getenv("LEDGER_ACCESS_UNROLL")) s.unroll = atoi(v) != 0;
+  if (const char* v = getenv("LEDGER_ACCESS_TMA_DIFF")) s.tma_diff_max = strtoull(v, nullptr, 10);
   if (s.patches.empty()) {
     fprintf(stderr, "ledger-access: set LEDGER_ACCESS_PATCHES\n");
     return 0;
@@ -485,13 +918,8 @@ int init() {
   Sanitizer_SubscriberHandle handle;
   if (!check(sanitizerSubscribe(&handle, callback, nullptr), "subscribe")) return 0;
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_RESOURCE, SANITIZER_CBID_RESOURCE_MODULE_LOADED);
-  sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, SANITIZER_CBID_DRIVER_API_cuGraphLaunch);
-  sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, SANITIZER_CBID_DRIVER_API_cuGraphLaunch_ptsz);
-  for (auto id : {SANITIZER_CBID_DRIVER_API_cuLaunchKernel, SANITIZER_CBID_DRIVER_API_cuLaunchKernel_ptsz,
-                  SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx, SANITIZER_CBID_DRIVER_API_cuLaunchKernelEx_ptsz})
-    sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, id);
-  sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, SANITIZER_CBID_DRIVER_API_cuProfilerStart);
-  sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API, SANITIZER_CBID_DRIVER_API_cuProfilerStop);
+  // Every driver call: the next call after a tensor-map launch is where its writes are found.
+  sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_DRIVER_API);
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_LAUNCH, SANITIZER_CBID_LAUNCH_BEGIN);
   sanitizerEnableCallback(1, handle, SANITIZER_CB_DOMAIN_GRAPHS, SANITIZER_CBID_GRAPHS_NODE_LAUNCH_BEGIN);
   sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_SYNCHRONIZE);

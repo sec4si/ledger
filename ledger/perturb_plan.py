@@ -26,7 +26,9 @@ divide into N rows of whole 32-byte sub-blocks form one more experiment, row -1.
 import argparse
 import json
 
-from ledger.dataflow import SUB, load_access
+import numpy as np
+
+from ledger.dataflow import SUB, load_access, range_events
 
 
 def merge(ranges):
@@ -71,6 +73,10 @@ def main():
     args = ap.parse_args()
 
     meta, shift, lid, kind, gran, mask, _pcs = load_access(args.access)
+    extra = range_events([m for m in meta if "tma_writes" in m], shift)  # what tensor-map launches wrote
+    if extra:
+        e = np.array(extra, dtype=np.int64)
+        lid, kind, gran, mask = (np.concatenate([a, e[:, i]]) for i, a in enumerate((lid, kind, gran, mask)))
     kernels = [m for m in meta if m["name"] not in ("memcpy", "memset")]
     names = [m["name"] for m in kernels]
     step = [line.strip() for line in open(args.launches) if line.strip()]

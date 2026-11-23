@@ -26,6 +26,14 @@ per expert for the grouped GEMM. The rest of the step reads everything it writes
 DeepGEMM's sm120 GEMMs move their operands with tensor-map copies, which the Sanitizer API does not instrument;
 `ledger.dataflow` treats them as reading and writing the traced range their pointers start (see `access/README.md`).
 
+The tracer now runs CUDA graphs node by node and reads the tensor maps among a launch's parameters, so the
+same step can be traced with CUDA graphs on (1,169 launches per step, every one seen, 96% with parameters):
+78.9 MB written per step, 0.3 MB of it dead. What the GEMMs write through tensor maps is measured by
+comparing the tensors before and after each launch (about 15 MB per step, none of it dead). Their reads
+are not: DeepGEMM encodes its activation maps for 4,096 rows, so each is taken to read up to the end of
+the allocator segment it starts in. That can hide dead writes and does here: `_fwd_kernel_ep_scatter_2`
+no longer shows its 40%.
+
 ## 2. The experts are read exactly, but slowly
 
 The expert weights move through tensor maps too, so the tracer cannot say which experts a step reads.

@@ -2,7 +2,7 @@
 
 Needed bytes are what the launch's computation touches: the weight it streams (as in the main report:
 its largest referenced weight and the tensors of the same module) plus the distinct non-weight bytes the
-access tracer saw it read. Pulled bytes are what the L2 filled from memory while it ran, from an Nsight
+access tracer saw it read, the tensors of its tensor maps included. Pulled bytes are what the L2 filled from memory while it ran, from an Nsight
 Compute profile of the same step (application replay, caches left as the program leaves them):
 
     ncu --replay-mode application --cache-control none --profile-from-start off --print-kernel-base mangled \
@@ -27,7 +27,7 @@ import json
 from collections import defaultdict
 
 from ledger import analyze as A
-from ledger.dataflow import SUB, load_access
+from ledger.dataflow import SUB, load_access, range_events
 
 
 def read_profile(path):
@@ -78,7 +78,8 @@ def main():
     sub = (1 << shift) // SUB
     read_bits = defaultdict(lambda: defaultdict(int))
     wanted = set(ids)
-    for L, k, g, m in zip(lid.tolist(), kind.tolist(), gran.tolist(), mask.tolist()):
+    tma = range_events([m for m in kernels if "tma_reads" in m], shift)  # tensors read through tensor maps
+    for L, k, g, m in list(zip(lid.tolist(), kind.tolist(), gran.tolist(), mask.tolist())) + tma:
         if k == 0 and L in wanted:
             read_bits[L][g] |= m
     traced = {L: sum(bin(m).count("1") for m in gs.values()) * sub for L, gs in read_bits.items()}

@@ -2,9 +2,10 @@
 
 Input is an access trace (`access/`: for every launch, the 1 KiB granules it read and wrote, with
 32-byte sub-block masks, the byte ranges of memcpy/memset calls, and the parameters of driver-API
-launches) and optionally a capture of the same program (`capture/`) for launch times. Launches that
-move data through tensor maps (a 128-byte parameter) or show no access at all are only partly seen;
-each is taken to read and write everything its pointers land in: the named region; else the run of
+launches) and optionally a capture of the same program (`capture/`) for launch times. A tensor-map
+launch reads the tensors its maps span and writes what changed in them (both recorded by the tracer).
+Launches with tensor maps the tracer could not decode or compare (a 128-byte parameter), or with no
+access at all, are only partly seen; each is taken to read and write everything its pointers land in: the named region; else the run of
 traced granules starting at the pointer (the tensor other launches wrote or read there); else the
 whole allocation segment (from --layout, or the "segment" entries of the regions file). Memory the host maps for kernels (pinned
 segments) is written and read by the CPU unseen and counts as live. Weights are not traced.
@@ -55,12 +56,12 @@ def load_access(path):
 
 
 def range_events(meta, shift):
-    """memcpy/memset ranges as (launch, kind, granule, mask) rows."""
+    """memcpy/memset ranges and the tensors of tensor-map launches as (launch, kind, granule, mask) rows."""
     rows = []
     size = 1 << shift
     sub = size // SUB
     for m in meta:
-        for kind, key in ((0, "reads"), (1, "writes")):
+        for kind, key in ((0, "reads"), (1, "writes"), (0, "tma_reads"), (1, "tma_writes")):
             for b, e in m.get(key, []):
                 for g in range(b >> shift, ((e - 1) >> shift) + 1):
                     lo, hi = max(b, g << shift) - (g << shift), min(e, (g + 1) << shift) - (g << shift)
@@ -177,7 +178,10 @@ def main():
         own = by_id[i].get("params")
         return own if own else (params[position[i]] or {}).get("params")
 
-    tensor_map = lambda i: any(size == 128 for _o, size, _h in launch_params(i) or [])
+    # A launch whose tensor maps the tracer decoded and compared is seen; one with a 128-byte parameter
+    # it could not (or a tensor too large to compare) stays opaque.
+    tensor_map = lambda i: ("tma_reads" in by_id[i] and by_id[i].get("tma_partial", False)) or (
+        "tma_reads" not in by_id[i] and any(size == 128 for _o, size, _h in launch_params(i) or []))
     blind_launches = [i for i in kernel_ids if not seen[i] or tensor_map(i)]
     wild = []  # opaque launches without parameters: they may have touched anything
     observed = set(gran.tolist())
