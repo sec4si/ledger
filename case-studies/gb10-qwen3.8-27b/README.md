@@ -50,6 +50,7 @@ Most weight-streaming launches run at 85 to 96% of the ceiling. Two items stand 
 
 - **`lm_head` is read four times per step.** The main model reads it once and each of the three
   MTP draft steps reads the full 248k-vocabulary head again: 5.1 GB, about 18% of the step.
+  Section 9.
 - **GDN `out_proj` runs at 64%**, far below its neighbours. Section 4.
 
 ## 4. Same kernel, same shape, different speed
@@ -186,6 +187,31 @@ are in the PR.
 0.34.0 runs the small BF16 `in_proj_ba` GEMM on a parallel graph branch next to `in_proj_qkvz`
 and fuses several norm/quant pairs. The GDN out_proj split, the four `lm_head` reads and the
 BF16 draft weights are unchanged.
+
+## 9. Smaller draft heads
+
+The drafts only propose tokens; the main model checks them. A draft head over part of the vocabulary
+reads that part of `lm_head` instead of all 1.27 GB, and can only cost acceptance, never correctness.
+The ledger put the three draft reads at 5.6 ms each, 16.8 ms per step. Tried in Sibyl's replay of
+the recording (the same kernels and addresses as the engine): the drafts' `lm_head` GEMM replaced by an
+FP8 GEMV over the first 32,768 token ids, every other column -inf ([`draft-head`](draft-head)).
+Batch 1, 200 tokens per request, one English prompt:
+
+| | full vocabulary | first 32,768 ids |
+|---|---|---|
+| step (median) | 120.4 ms | **106.1 ms** |
+| greedy: tokens per step | 2.84 | 2.73 |
+| greedy: tokens/s | 23.6 | **25.7 (+9%)** |
+| greedy: output | | identical |
+| sampled (3 seeds, T 0.2 and 0.9): tokens per step | 2.51 | 2.49 |
+| sampled: tokens/s | 20.7 | **23.4 (+13%)** |
+
+The step loses 14.3 ms of the 16.8 the ledger predicted; the rest is the GEMV and the -inf fill.
+Greedy decoding loses some acceptance where the best draft is outside the first 32,768 ids. Choosing
+the rows by frequency in GSM8K, Python sources and English documentation did no better (2.76 and
+2.43 tokens per step); a corpus closer to what the model writes may. Not measured: other languages
+(the low ids are mostly English pieces), larger batches. vLLM's EAGLE-3 drafts already map a small
+draft vocabulary onto the target's; the MTP drafts share the full head.
 
 ## Reproduce
 
