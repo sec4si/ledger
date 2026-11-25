@@ -56,7 +56,7 @@ def dump_runner(runner, out, properties, draft_tokens):
     """Write Ledger metadata for a model runner after its weights and KV pool are ready."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    prefix = "draft." if runner.is_draft_worker else ""
+    prefix = "drafter." if runner.is_draft_worker else ""  # analyze.DRAFT tells draft launches by it
     regions, attention = [], []
     for kind, tensors in (("weight", runner.model.named_parameters()), ("buffer", runner.model.named_buffers())):
         for name, tensor in tensors:

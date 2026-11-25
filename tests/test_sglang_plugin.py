@@ -84,7 +84,7 @@ def test_initializer_exports_named_weights_kv_views_and_run(tmp_path, monkeypatc
     plugin.dump_runner(runner, tmp_path, props, draft_tokens=1)
     merged = json.loads((tmp_path / f"regions-{os.getpid()}.json").read_text())
     assert merged[:-1] == regions
-    assert merged[-1]["name"] == "draft.proj.weight"
+    assert merged[-1]["name"] == "drafter.proj.weight"
     assert json.loads((tmp_path / "run.json").read_text())["draft_tokens"] == 3
 
 
