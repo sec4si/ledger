@@ -274,6 +274,18 @@ def load_run(capture):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
+def window_steps(capture):
+    """Steps in the window: run.json's count (examples/vllm_decode.py), else the step markers (the vLLM
+    plugin under `vllm serve`, where the window holds however many steps the load produced)."""
+    steps = load_run(capture).get("steps")
+    if steps:
+        return steps
+    steps = sum(MARKER in k["name"] for k in read_jsonl(os.path.join(capture, "kernels-*.jsonl")))
+    if not steps:
+        raise SystemExit(f"{capture}: no step count in run.json and no step markers; pass --steps")
+    return steps
+
+
 def report(capture, ceiling, steps, out, peaks=None, sms=None):
     rows, unresolved, n_regions = build(capture, ceiling)
     run = load_run(capture)
@@ -490,7 +502,7 @@ def main():
     ap.add_argument("--sms", type=int, default=None, help="SM count (default: run.json)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    steps = a.steps or json.load(open(os.path.join(a.capture, "run.json")))["steps"]
+    steps = a.steps or window_steps(a.capture)
     report(a.capture, a.ceiling_gbps, steps, a.out, parse_peaks(a.peak_tflops), a.sms)
 
 

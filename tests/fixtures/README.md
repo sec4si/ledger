@@ -13,5 +13,7 @@ built for 12.1, cut to their first three steps with `tools/trim_capture.py`:
 
 Each directory is what `examples/vllm_decode.py` writes under `LEDGER_OUT`: the capture library's
 JSONL files, `regions-*.json`, `attention-*.json` (where exported), `run.json` and `steps.jsonl`.
-Tests unpack the archive into a temporary directory. Measured ceilings on that machine: 252 GB/s
+The captures predate the capture library's CUkernel fix (`5f221cd`), so each keeps 14 launches per step
+without parameters (small PyTorch kernels); a current capture of the same run has none. Tests unpack the
+archive into a temporary directory. Measured ceilings on that machine: 252 GB/s
 read bandwidth, BF16 91 and FP8 181 TFLOP/s.

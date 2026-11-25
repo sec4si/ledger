@@ -27,7 +27,7 @@ def groups(capture, ceiling):
     run = A.load_run(capture)
     A.split_steps(rows)
     rows = [r for r in rows if A.MARKER not in r["name"]]
-    steps = run.get("steps") or 1
+    steps = A.window_steps(capture)
     out = defaultdict(list)
     for r in rows:
         # Only a streamed weight names a group: a small tensor (a scale) can be hit by a stray word, and
