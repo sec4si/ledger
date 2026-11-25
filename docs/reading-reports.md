@@ -19,13 +19,35 @@ python -m ledger.analyze <capture> --ceiling-gbps <measured> [--peak-tflops bf16
 ### Header line
 
 ```
-38880 kernel launches over 40 steps, 1779 memory regions, 880 launches without parameters. Bandwidth ceiling 252 GB/s.
+38880 kernel launches over 40 steps, 1779 memory regions, 560 launches without parameters. Bandwidth ceiling 252 GB/s.
 ```
 
 Check **launches without parameters** first. Launches whose arguments could not be captured carry
-no weight or cache attribution. On GB10 with vLLM 0.31, 880 of 38,880 launches (22 per step,
-including one of the four `lm_head` reads) had no parameters; on vLLM 0.34 there were none. If a
-large fraction of launches is unresolved, the weight byte totals below are under-counted.
+no weight or cache attribution. On GB10 with vLLM 0.31, 560 of 38,880 launches (14 per step, all
+small PyTorch kernels that stream no weight) had no parameters. Since the capture library's
+`CUkernel` fix (`5f221cd`), GB10 with vLLM 0.34 has zero launches without parameters in both decode
+and eager prefill. If a large fraction of launches is unresolved on another stack, the weight byte
+totals below are under-counted.
+
+### `## Findings`
+
+Lists up to the five largest costs found across the rest of the report, ranked by **ms per step**
+(items below 0.5 ms/step are omitted). Each entry is measured against its own reference:
+
+- **Inter-kernel GPU idle** (`Step`), when idle is at least 1 ms/step or 2% of step wall time;
+- **Slow weight-streaming groups** (`Weight-streaming launches by weight`), against the bandwidth
+  floor — or, when `--peak-tflops` is passed, the larger of the bandwidth and compute floors
+  (groups multiplying more than 64 rows without `--peak-tflops` are flagged with a note to pass
+  peaks rather than judged against bandwidth alone);
+- **Same-kernel, same-shape splits** (`Same kernel, same shape`), excess time of the slower weight
+  group over the faster group on the same kernel and grid;
+- **Repeated weight reads** (`Weights read more than once`), extra bytes per step priced at the
+  bandwidth ceiling;
+- **Underfilled launches** (`Launches with fewer blocks than SMs`), the idle SMs' share of
+  alone time (`alone_ms * (1 - blocks / SMs)`) for launches not already near the bandwidth ceiling.
+
+Treat each number in `## Findings` as an **upper bound on what fixing that item could save**, not a
+guaranteed speedup; jump to the section named in parentheses for the evidence and caveats.
 
 ### `## Step`
 
@@ -33,12 +55,12 @@ Summarizes one step across the capture window:
 
 - **wall time / GPU busy / idle between kernels**: GPU busy is the union of kernel intervals; idle
   is the gap between kernels inside the window. On GB10 Qwen3.8-27B (batch 1), wall time is
-  120.9 ms, GPU busy is 120.5 ms, and idle between kernels is 0.36 ms (0.3%). When idle is under a
-  percent, fusing kernels solely to eliminate launch gaps buys almost nothing.
+  120.88 ms, GPU busy is 120.52 ms, and idle between kernels is 0.36 ms (0.3%). When idle is under
+  a percent, fusing kernels solely to eliminate launch gaps buys almost nothing.
 - **weight bytes streamed / effective bandwidth / floor at ceiling**: `floor = weight bytes / ceiling`.
-  In the same capture, 24.2 GB at 252 GB/s gives a 96 ms floor against 120.5 ms GPU busy (201 GB/s,
-  80% of ceiling). The gap between GPU busy and the floor is the maximum time you could recover
-  without changing the bytes read.
+  In the same capture, 25.47 GB at 252 GB/s gives a 101.08 ms floor against 120.52 ms GPU busy
+  (211 GB/s, 84% of ceiling). The gap between GPU busy and the floor is the maximum time you could
+  recover without changing the bytes read.
 
 ### `## Weight-streaming launches by weight`
 
@@ -92,9 +114,8 @@ not the GEMM.
 Lists weights of at least 1 MB streamed more than 1.5 times per step, along with extra GB/step.
 
 In Qwen3.8-27B with 3 MTP draft tokens, `lm_head` (1271.4 MB) is read once by the main model and
-three times by the draft head — **5.1 GB**, about **18%** of the step (Ledger attributes 3 of the 4
-reads on vLLM 0.31; the fourth is opaque). Draft-layer weights (`speculator.*`) are also read 3
-times per step.
+three times by the draft head — 4.0 reads/step (3.81 extra GB/step, 5.1 GB total, about **18%** of
+the step). Draft-layer weights (`speculator.*`) are also read 3 times per step.
 
 Beneath the table, **Partial reads** lists tensors referenced by launches too short to have read
 the whole weight even at 1.3× the ceiling (such as `embed_tokens`, which gathers a few rows rather
