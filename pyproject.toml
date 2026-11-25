@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ledger"
+version = "0.1.0"
+description = "Per-launch accounting for LLM inference on GPUs"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+dataflow = ["numpy"]
+
+[project.scripts]
+ledger = "ledger.cli:main"
+
+[project.entry-points."vllm.general_plugins"]
+ledger = "ledger.vllm_plugin:register"
+
+[tool.setuptools]
+packages = ["ledger", "ledger._capture", "ledger._access", "ledger._bench", "ledger._examples"]
+
+[tool.setuptools.package-dir]
+"ledger._capture" = "capture"
+"ledger._access" = "access"
+"ledger._bench" = "bench"
+"ledger._examples" = "examples"
+
+[tool.setuptools.package-data]
+"ledger._capture" = ["Makefile", "ledger_cupti.cc"]
+"ledger._access" = ["Makefile", "tracer.cpp", "access.h", "patches.cu"]
+"ledger._bench" = ["bwtest.cu"]
