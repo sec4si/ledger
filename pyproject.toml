@@ -31,3 +31,6 @@ packages = ["ledger", "ledger._capture", "ledger._access", "ledger._bench", "led
 "ledger._capture" = ["Makefile", "ledger_cupti.cc"]
 "ledger._access" = ["Makefile", "tracer.cpp", "access.h", "patches.cu"]
 "ledger._bench" = ["bwtest.cu"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

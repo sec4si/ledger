@@ -47,17 +47,21 @@ def call_main(module, command, args):
         sys.argv = argv
 
 
-def capture_device(captures, missing):
+def capture_device(captures, required):
     """Read the GPU model from the captures so offline analysis needs no GPU."""
     names = []
     for capture in captures:
         try:
             device = load_run(capture).get("device")
         except (OSError, ValueError, AttributeError) as error:
+            if not required:
+                return None
             raise SystemExit(f"ledger: could not read {Path(capture) / 'run.json'}: {error}") from error
         if not isinstance(device, str) or not device.strip():
+            if not required:
+                return None
             raise SystemExit(f"ledger: {Path(capture) / 'run.json'} does not identify the GPU. "
-                             f"Pass {missing} explicitly.")
+                             "Pass --ceiling-gbps explicitly.")
         names.append(device)
     if len(set(names)) != 1:
         raise SystemExit("ledger: the captures name different GPU models. Pass --ceiling-gbps explicitly.")
@@ -83,13 +87,13 @@ def report_args(command, args):
     if unknown or not (need_bandwidth or need_compute):
         return args
 
-    missing = " and ".join(option for required, option in
-                           ((need_bandwidth, "--ceiling-gbps"), (need_compute, "--peak-tflops")) if required)
-    device = capture_device(captures, missing)
-    cached = ceilings.load(device)
+    device = capture_device(captures, required=need_bandwidth)
+    cached = ceilings.load(device) if device else None
     if cached is None:
-        raise SystemExit(f"ledger: no cached ceilings for {device} ({ceilings.cache_path(device)}). "
-                         f"Run 'ledger ceilings' on that GPU or pass {missing} explicitly.")
+        if need_bandwidth:
+            raise SystemExit(f"ledger: no cached ceilings for {device} ({ceilings.cache_path(device)}). "
+                             "Run 'ledger ceilings' on that GPU or pass --ceiling-gbps explicitly.")
+        return args
 
     defaults = []
     if need_bandwidth:
