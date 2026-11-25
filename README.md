@@ -4,166 +4,84 @@ Per-launch accounting for LLM inference on GPUs: who read what, who wrote what, 
 
 Profilers group time by kernel name. In a decode step the same GEMM kernel runs on dozens of
 different weights, and the cost of one kernel's writes can surface as the next kernel's time.
-Name-level totals average all of that away. Ledger keeps the books per launch instead:
-
-- it records the parameters of every kernel the engine launches, including every kernel node of
-  every CUDA graph, and the memory map of the engine's tensors (weights, KV and recurrent-state caches);
-- it times each launch inside a steady-state window;
-- it resolves each launch's pointer arguments against the memory map, so every launch knows which
-  weight it streamed and which caches it touched;
-- it compares each launch with the measured bandwidth ceiling and flags launches that should
-  behave the same but do not;
-- it traces which device memory each launch read and wrote, and follows data from writer to
-  reader: bytes written and overwritten unread, hand-offs between neighbours, and, by poisoning
-  writes in a replay, which of them the output actually depends on.
+Name-level totals average all of that away. Ledger records every kernel launch (including every
+kernel node of every CUDA graph), resolves its pointer arguments against the engine's memory map
+(weights, KV and recurrent-state caches), compares each launch against measured hardware ceilings,
+and can trace byte-level reads, writes, and dead stores across launches.
 
 Ledger is part of the [sec4si](https://sec4.si) research ecosystem.
 
-## What it found on DGX Spark
+## Findings on DGX Spark (GB10)
 
-On a DGX Spark (GB10) running Qwen3.8-27B NVFP4 with MTP speculative decoding in vLLM, the
-output projection of the Gated DeltaNet layers took 195 us per launch while the attention output
-projection, the same CUTLASS kernel on a weight of the same shape, took 147 us. In isolation the
-two weights run at identical speed. The difference is the GDN decode kernel that runs just
-before: with three draft tokens it writes a full 3.15 MB recurrent state for each of four
-positions, 12.6 MB per layer, and those dirty lines are flushed from L2 while the projection
-streams its weight. Only the state at the accepted position is ever read again.
+- **Cross-kernel dirty-L2 write-back in GDN speculative decoding:** On Qwen3.8-27B NVFP4 with MTP
+  (`k=3`), GDN `out_proj` took 195 us while attention `o_proj` — the same CUTLASS kernel on the
+  same weight shape — took 147 us, because the preceding GDN decode kernel wrote 12.6 MB/layer of
+  recurrent state that flushed from L2 during `out_proj`. Deferring the stores is bit-identical and
+  raises serving throughput by 5.2% / 7.5% at concurrency 4 / 8 (submitted as
+  [vllm#69160](https://github.com/vllm-project/vllm/pull/69160);
+  [case study](case-studies/gb10-qwen3.8-27b)).
+- **Slow MoE backend selection on SM12x:** On Qwen3-30B-A3B FP8, Ledger showed almost no wasted
+  writes and exact 8-expert reads per layer, but DeepGEMM ran at only 60–66% of the 252 GB/s
+  ceiling. Preferring vLLM's Triton backend raises serving throughput by 18–44% at concurrency 1–8
+  with unchanged GSM8K accuracy (submitted as
+  [vllm#69355](https://github.com/vllm-project/vllm/pull/69355);
+  [case study](case-studies/gb10-qwen3-30b-a3b)).
+- **GEMMs that outgrow the L2:** On GB10, FP8 and NVFP4 GEMMs whose A operand is larger than about
+  12 MiB run 2-3x slower (an 8192-row FP8 GEMM at 55 against 170 TFLOP/s), which the compute
+  ceilings exposed in prefill. Running them as row slices is bit-identical and cuts the latency of an
+  8192-token prompt on Qwen3.8-27B by 42% (submitted as
+  [vllm#69595](https://github.com/vllm-project/vllm/pull/69595)).
+- **Dead writes vs. input-dependent state, and repeated `lm_head` reads:** Access tracing of the
+  Qwen3.8 step found 460 MB of 712 MB written per step dead, of which only 3.4 MB is fixed and
+  droppable while the rest depends on draft acceptance
+  ([dataflow.md](case-studies/gb10-qwen3.8-27b/dataflow.md)); the books also put the three draft
+  `lm_head` reads at 16.8 ms/step, where drafting over the first 32,768 token IDs in replay saved
+  14.3 ms with unchanged greedy output
+  ([section 9](case-studies/gb10-qwen3.8-27b/README.md)).
 
-A name-level profile shows "this GEMM is slow". Ledger shows whose bill it is. Deferring the
-stores to the next step is bit-identical and raises serving throughput by 5.2% / 7.5% at
-concurrency 4 / 8 on that machine; it is submitted upstream as
-[vllm-project/vllm#69160](https://github.com/vllm-project/vllm/pull/69160). The full case study,
-with the measurements and the scripts to reproduce them, is in
-[`case-studies/gb10-qwen3.8-27b`](case-studies/gb10-qwen3.8-27b).
+## Quickstart
 
-On the same machine, Qwen3-30B-A3B FP8 (a mixture of experts) writes almost nothing for nothing, and its
-expert GEMMs read exactly the eight routed experts per layer, but at 60-66% of the bandwidth ceiling.
-vLLM picks DeepGEMM for block FP8 MoE on SM12x; its Triton backend is faster there, by 18-44% in serving
-throughput at concurrency 1-8 with unchanged GSM8K accuracy. The change is proposed as
-[vllm-project/vllm#69355](https://github.com/vllm-project/vllm/pull/69355); the case study is in
-[`case-studies/gb10-qwen3-30b-a3b`](case-studies/gb10-qwen3-30b-a3b).
-
-The access trace of the Qwen3.8 step finds 460 MB of its 712 MB of writes per step dead, but only
-3.4 MB of that can simply be dropped: the GDN states are dead in every step, yet which of the four
-depends on how many drafts were accepted, which is why the fix defers them rather than dropping them
-([`dataflow.md`](case-studies/gb10-qwen3.8-27b/dataflow.md)). The books also put the three draft
-reads of `lm_head` at 16.8 ms per step; drafting over the first 32,768 token ids in a replay saved
-14.3 ms with unchanged greedy output (section 9 of the case study).
-
-## Use
-
-Build the capture library against the CUDA toolkit of the target machine:
+In the Python environment with `vllm` and CUDA `torch`:
 
 ```sh
-make -C capture CUDA=/usr/local/cuda
+pip install -e .
+ledger build
+ledger ceilings                                       # run with the GPU idle
+ledger profile --steps 20 --out run1 -- --model <model> [vLLM args...]
 ```
 
-Measure the device's read bandwidth ceiling once:
+Open `run1/report.md` starting at `## Findings`, load `run1/trace.json` in
+[ui.perfetto.dev](https://ui.perfetto.dev), and compare two runs with `ledger diff run1 run2`.
+See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough (including `ledger report`,
+`vllm serve` plugin usage, non-vLLM CUDA programs, and Sibyl replays).
 
-```sh
-nvcc -O3 -arch=native -o bwtest bench/bwtest.cu && ./bwtest
-```
+## Tools
 
-Capture a steady-state decode window. For vLLM, `examples/vllm_decode.py` starts an in-process
-engine with your arguments, exports the memory map and decodes inside
-`cudaProfilerStart`/`cudaProfilerStop`:
+| command | what it does |
+|---|---|
+| `ledger build` | Compile `capture/libledger.so` (and with `--access`, the Compute Sanitizer tracer) against the local CUDA toolkit. |
+| `ledger ceilings` | Measure and cache GPU DRAM read bandwidth (`bench/bwtest.cu`) and GEMM TFLOP/s (`bench/flops.py`). |
+| `ledger profile` | Capture a vLLM run under CUPTI and write `<out>/report.md` (`analyze` + `steps`) and `<out>/trace.json`. |
+| `ledger report` | Re-generate the combined `analyze` + `steps` Markdown report from an existing capture directory. |
+| `ledger analyze` | Per-launch bandwidth, compute floor, same-kernel/same-shape splits, repeated reads, underfilled grids, and top `## Findings`. |
+| `ledger steps` | Step-to-step cycle split (GPU busy, intra-step idle, host idle), speculative yield, KV-cache attention bandwidth, and SM clocks. |
+| `ledger diff` | Compare two captures launch group by launch group past run-to-run clock/power-cap drift, plus token equality. |
+| `ledger perfetto` | Export a capture to Chrome Trace Event JSON (`Steps`, per-CUDA `Stream`, and `Memcpy` tracks) for [ui.perfetto.dev](https://ui.perfetto.dev). |
+| `ledger transfers` | Account for H2D/D2H/D2D memory copies by region, direction, exposed time, and pageable host memory. |
+| `ledger dataflow` | Follow byte-level reads and writes from an access trace (`access/`) to find dead writes, hand-offs, and constant inputs. |
+| `ledger dead-across` | Split dead writes across multiple traces into fixed (droppable), moving (input-dependent), and varying. |
+| `ledger traffic` | Join an access trace with an Nsight Compute profile to compare bytes needed against bytes pulled into L2. |
+| `ledger sass` | Look up the SASS instruction behind a dead store from a cubin directory, function, and PC offset. |
+| `ledger perturb-plan` / `perturb-report` | Generate and summarize replay memory-poisoning experiments (e.g. Sibyl `replay_perturb`). |
+| `ledger sibyl-regions` | Convert a Sibyl recording's address ranges into Ledger's `regions-*.json` memory map. |
 
-```sh
-LD_PRELOAD=$PWD/capture/libledger.so LEDGER_OUT=out \
-  python examples/vllm_decode.py --steps 40 --batch 1 -- --model <model> [vLLM args...]
-```
+## Documentation
 
-Any other CUDA program works the same way: preload the library, bracket the window you care about
-with `cudaProfilerStart`/`cudaProfilerStop`, and write the memory map as `regions-<pid>.json`
-(a list of `{kind, name, addr, size, shape, dtype}`; see `ledger/vllm_regions.py`).
-
-Programs that never call `cudaProfilerStart` can open the window by graph launch count instead:
-`LEDGER_GRAPH_WINDOW=<skip>:<take>` opens it at the graph launch numbered `<skip>` and closes it
-before the one numbered `<skip>+<take>`. Close it while the program is still running: kernels still
-in flight when the window closes get bogus end times, so capture one step more than you need and
-drop the last. CUPTI's worker threads do not survive `fork()`; for programs that fork one process
-per GPU, set `LEDGER_INIT_IN_CHILD=1` so that each child starts CUPTI itself.
-
-A [Sibyl](https://github.com/GeetoRinku/sibyl) replay keeps the recorded addresses, so the
-recording's memory map applies to it unchanged:
-
-```sh
-python -m ledger.sibyl_regions <recording>/ranges-rank0-<pid>.json out
-LD_PRELOAD=$PWD/capture/libledger.so LEDGER_OUT=out LEDGER_GRAPH_WINDOW=8:44 <replay program> ...
-```
-
-Analyze:
-
-```sh
-python -m ledger.analyze out --ceiling-gbps <measured> [--peak-tflops bf16=<>,fp8=<>] --out report.md
-```
-
-Besides the books per weight, the report lists launches with fewer blocks than the GPU has SMs, with
-the time they run alone (a launch on a parallel graph branch costs the step less than its duration),
-and, given measured peaks (`python bench/flops.py`), each weight-streaming launch against both
-ceilings: bytes at the bandwidth ceiling and FLOPs at the peak of its precision. FLOPs take M from
-`run.json` (prefill tokens, or batch times one plus the draft tokens), which fits vLLM's layout. With
-`--prefill N`, `examples/vllm_decode.py` times one step that prefills an N-token prompt.
-
-Per step (`examples/vllm_decode.py` puts a marker kernel at the start of each step and writes
-`steps.jsonl`: host time, tokens per request, SM clock, power and temperature):
-
-```sh
-python -m ledger.steps out --ceiling-gbps <measured>
-```
-
-reports the cycle from step to step split into GPU busy, idle inside the step and idle between steps
-(host work the GPU waits for); with speculative decoding, tokens gained per step, main-model and
-draft time and the cost per generated token; attention launches against one read of K and V for the
-context (run with `--prompt-tokens N` for a long one); and steps that ran slow on a lower clock.
-
-Two captures of the same program, before and after a change:
-
-```sh
-python -m ledger.diff before after --ceiling-gbps <measured>
-```
-
-groups launches by kernel, grid and weight, takes the time-weighted median ratio of the groups both
-runs share as the drift (clock, power cap), and lists the groups that moved beyond it, kernels whose
-template arguments changed paired by short name, and whether the generated tokens match.
-
-
-Memory copies in the window are kept the same way. Engines that hold part of the model off the GPU
-(expert or KV offload, weight streaming) pay for it in copies, and a copy costs the step only the
-part of it that no kernel runs alongside. `ledger.transfers` names the region each copy fills or
-drains, sums bytes, time and exposed time per region and direction, flags pageable host memory and
-compares bandwidth with the host-to-device ceilings that `bwtest` also prints:
-
-```sh
-python -m ledger.transfers out --h2d-gbps <measured> --d2h-gbps <measured> --out transfers.md
-```
-
-## Who read and wrote what
-
-The access tracer (`access/`, Compute Sanitizer API) records, per launch inside the window, the
-device memory it read and wrote at 32-byte resolution, with the PC of each access and the byte
-ranges of copies and fills. It runs CUDA graphs node by node itself, and reads the tensor maps
-among a launch's parameters, so TMA kernels are covered too. See [`access/README.md`](access/README.md)
-for the build, the environment variables and the self-tests.
-
-```sh
-make -C access CUDA=/usr/local/cuda ARCH=<sm>
-LD_PRELOAD=$PWD/access/libledger_access.so LEDGER_ACCESS_PATCHES=$PWD/access/patches.fatbin \
-  LEDGER_OUT=acc LEDGER_ACCESS_SKIP=auto <program>          # window: the profiling range, as above
-python -m ledger.dataflow acc --anchor <first kernel of a step> [--cubins <dir>] [--masks-out m.npz]
-python -m ledger.dead_across acc*/m.npz                     # several traces: droppable or input-dependent
-python -m ledger.sass <cubin dir> <function> <offset>       # the instruction behind a dead store
-```
-
-`ledger.dataflow` reports dead writes (by kernel, instruction and region), launches whose every
-write is dead, hand-offs to the next launch only, constant inputs and independent neighbours.
-`ledger.dead_across` splits dead writes over several traces into the same bytes dead every step,
-as much dead every step but different bytes, and dead in some steps only.
-
-Value experiments need a replay that can poison memory right after a given launch (Sibyl's
-`replay_perturb`): `ledger.perturb_plan` turns a trace into experiments, one per tensor a launch
-wrote, and `ledger.perturb_report` reads the results back. `ledger.traffic` joins a trace with an
-Nsight Compute profile to compare what each launch needed with what it pulled from memory.
+- [Quickstart](docs/quickstart.md) — install, build, measure ceilings, profile vLLM, Perfetto export, `vllm serve` plugin, and non-vLLM programs.
+- [Reading Ledger Reports](docs/reading-reports.md) — section-by-section guide to `analyze`, `steps`, and `diff`, plus how to confirm findings.
+- [Access Tracer (`access/README.md`)](access/README.md) — Compute Sanitizer build, environment variables, and self-tests.
+- [Case Study: Qwen3.8-27B NVFP4 on GB10](case-studies/gb10-qwen3.8-27b) — GDN dirty-L2 write-back and deferred stores.
+- [Case Study: Qwen3-30B-A3B FP8 MoE on GB10](case-studies/gb10-qwen3-30b-a3b) — DeepGEMM vs. Triton backend selection.
 
 ## Limits
 
@@ -182,11 +100,10 @@ Nsight Compute profile to compare what each launch needed with what it pulled fr
   step, the same GPU busy time).
 - NVML power readings on GB10 are not usable as GPU power (a few watts under full load); the SM
   clock and temperature are.
-- Tested on NVIDIA GB10 (sm_121) with vLLM 0.31 and 0.34.
+- Tested on NVIDIA GB10 (sm_121) with vLLM 0.31, 0.34 and main.
 - Copy addresses are decoded for linear copies (`cudaMemcpy[Async]`, `cuMemcpy[Async]`,
   `cuMemcpy{HtoD,DtoH,DtoD}[Async]` and their per-thread-stream variants) and for memcpy nodes of
   graphs. 2D/3D, peer and symbol copies are timed and counted but not attributed to a region.
-
 - The access tracer finds what a tensor-map launch wrote by comparing its tensors before and after
   it (a write of the value already there does not show) and takes it to read every tensor its maps
   span; maps encoded for more rows than their tensor holds (DeepGEMM's) then read too much, which
