@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+TESTS_DIR = Path(__file__).resolve().parent
+ROOT = TESTS_DIR.parent
+for p in (ROOT, TESTS_DIR):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
-ARCHIVE = Path(__file__).resolve().parent / "fixtures" / "captures.tar.xz"
+ARCHIVE = TESTS_DIR / "fixtures" / "captures.tar.xz"
 
 
 @pytest.fixture(scope="session")

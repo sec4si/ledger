@@ -5,26 +5,7 @@ import re
 import pytest
 
 from ledger import steps
-
-
-def _section(text, heading):
-    """Return the body of a level-2 markdown section, excluding its heading."""
-    m = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
-    assert m, f"missing section: {heading}"
-    return m.group(1)
-
-
-def _table_rows(section_text):
-    """Parse markdown table data rows into lists of stripped cell strings."""
-    rows = []
-    for line in section_text.splitlines():
-        if not line.startswith("|"):
-            continue
-        cells = [c.strip() for c in line.strip("|").split("|")]
-        if all(re.fullmatch(r":?-+:?", c) for c in cells):
-            continue
-        rows.append(cells)
-    return rows[1:] if rows else []
+from report import section, table_rows
 
 
 def test_steps_decode_q38_speculative(captures, tmp_path):
@@ -33,7 +14,7 @@ def test_steps_decode_q38_speculative(captures, tmp_path):
     steps.report(str(captures / "decode-q38"), ceiling=252, out=str(out))
     text = out.read_text()
 
-    spec = dict(_table_rows(_section(text, "Speculative decoding")))
+    spec = dict(table_rows(section(text, "Speculative decoding")))
     tokens = float(spec["tokens gained (all requests)"])
     draft_ms = float(re.search(r"([\d.]+)\s*ms", spec["draft steps, GPU busy"]).group(1))
     assert tokens == pytest.approx(4.0, abs=0.1)
@@ -46,8 +27,8 @@ def test_steps_longctx_q38_attention(captures, tmp_path):
     steps.report(str(captures / "longctx-q38"), ceiling=252, out=str(out))
     text = out.read_text()
 
-    attn_section = _section(text, "Attention over the KV cache")
-    rows = _table_rows(attn_section)
+    attn_section = section(text, "Attention over the KV cache")
+    rows = table_rows(attn_section)
     main_reads = [
         r for r in rows
         if r[1] == "main" and "(not a context read)" not in r[6]
@@ -64,5 +45,5 @@ def test_steps_prefill_q38_single_step(captures, tmp_path):
     text = out.read_text()
 
     assert "1 steps," in text
-    timing = dict(_table_rows(_section(text, "Time per step")))
+    timing = dict(table_rows(section(text, "Time per step")))
     assert float(timing["GPU busy"]) > 0
