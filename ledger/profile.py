@@ -11,8 +11,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-from ledger import ceilings
-from ledger.cli import call_main
+from ledger import ceilings, perfetto
+from ledger.cli import call_main, report_ceilings
 
 CAPTURE_SOURCES = ("Makefile", "ledger_cupti.cc")
 ACCESS_SOURCES = ("Makefile", "tracer.cpp", "access.h", "patches.cu")
@@ -109,16 +109,30 @@ def capture(opts, vllm_args, library, out):
         raise SystemExit(f"ledger: vLLM exited with status {result.returncode}. Log: {log}\n{tail}")
 
 
-def write_report(out, measured):
-    common = [str(out), "--ceiling-gbps", str(measured["ceiling_gbps"])]
+def write_report(capture_dir, report, bandwidth, peaks):
+    """Combine the launch analysis and step breakdown in one Markdown report."""
+    common = [str(capture_dir), "--ceiling-gbps", str(bandwidth)]
+    analyze_args = [*common, "--peak-tflops", peaks] if peaks else common
     output = StringIO()
     with redirect_stdout(output):
-        call_main("analyze", "analyze", [*common, "--peak-tflops", ceilings.peak_argument(measured["peak_tflops"])])
+        call_main("analyze", "analyze", analyze_args)
         print()
         call_main("steps", "steps", common)
-    report = out / "report.md"
     report.write_text(output.getvalue())
     return report
+
+
+def report_main(args):
+    parser = argparse.ArgumentParser(prog="ledger report", description="Write launch and step reports together.")
+    parser.add_argument("capture", type=Path, help="existing capture directory")
+    parser.add_argument("--out", type=Path, help="output Markdown path (default: <capture>/report.md)")
+    parser.add_argument("--ceiling-gbps", type=float, help="measured read bandwidth (default: GPU cache)")
+    parser.add_argument("--peak-tflops", help="measured peaks per precision, e.g. bf16=91,fp8=181 (default: GPU cache)")
+    opts = parser.parse_args(args)
+    capture_dir = opts.capture.resolve()
+    report = (opts.out or capture_dir / "report.md").resolve()
+    bandwidth, peaks = report_ceilings("analyze", [capture_dir], opts.ceiling_gbps, opts.peak_tflops)
+    print(write_report(capture_dir, report, bandwidth, peaks))
 
 
 def main(args):
@@ -131,4 +145,9 @@ def main(args):
     measured = ceilings.load(device) or ceilings.measure(device)
     out.mkdir(parents=True, exist_ok=True)
     capture(opts, vllm_args, library, out)
-    print(write_report(out, measured))
+    bandwidth = measured["ceiling_gbps"]
+    report = write_report(out, out / "report.md", bandwidth, ceilings.peak_argument(measured["peak_tflops"]))
+    trace = out / "trace.json"
+    perfetto.export(out, bandwidth, trace)
+    print(report)
+    print(f"{trace} (open at https://ui.perfetto.dev)")
