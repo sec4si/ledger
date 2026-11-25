@@ -81,3 +81,24 @@ def test_cli_steps_and_diff_use_cached_ceiling(captures, tmp_path, monkeypatch):
         str(diff_out),
     )
     assert section(diff_out.read_text(), "Changed beyond drift")
+
+
+def test_cli_diff_gate_uses_cached_ceiling_and_exits_nonzero(captures, tmp_path, monkeypatch):
+    """ledger diff --fail-above resolves cached ceilings and exits non-zero on regression."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    _write_cache(ceiling_gbps=252)
+
+    out = tmp_path / "diff-gate.md"
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(
+            monkeypatch,
+            "diff",
+            str(captures / "decode-q38-bf16state"),
+            str(captures / "decode-q38"),
+            "--fail-above",
+            "5",
+            "--out",
+            str(out),
+        )
+    assert exc.value.code == 1
+    assert "Failed" in section(out.read_text(), "Gate")

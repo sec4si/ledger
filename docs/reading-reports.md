@@ -240,3 +240,11 @@ Lists launch groups ($\ge$ `--min-ms` per step) that exist in only one capture. 
 when switching backends (for example, `deep_gemm` vs. `triton` in Qwen3-30B-A3B), changing graph
 fusions (as between vLLM 0.31.0 and 0.34.0), or when one run unexpectedly fell back to eager
 execution.
+
+### `## Gate` (CI regression gate)
+
+Pass `--fail-above <percent>` (and optionally `--fail-min-ms`, default `0.5` ms/step) to use
+`ledger diff` as a CI check: it exits non-zero and lists the offending entries under `## Gate` when
+overall GPU busy per step slows down by more than the threshold, or when any shared kernel group
+regresses by more than the threshold beyond drift with at least `--fail-min-ms` extra ms/step. See
+[`docs/ci-diff-gate.yml`](ci-diff-gate.yml) for a self-hosted GPU GitHub Actions example.

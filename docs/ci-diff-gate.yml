@@ -1,0 +1,36 @@
+# Example GitHub Actions workflow: gate PRs on a self-hosted GPU runner with `ledger diff`.
+#
+# Copy into `.github/workflows/` of the repository you want to gate and adjust MODEL,
+# BASELINE_DIR, and the runner labels. Capture the baseline once on `main` into BASELINE_DIR
+# (or refresh it in a `push` job on `main`).
+name: GPU performance gate
+
+on:
+  pull_request:
+
+jobs:
+  perf-gate:
+    runs-on: [self-hosted, gpu]
+    env:
+      MODEL: Qwen/Qwen3-8B
+      BASELINE_DIR: /var/cache/ledger/baseline-main
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure GPU ceilings are cached
+        run: ledger ceilings
+
+      - name: Capture fixed decode workload
+        run: |
+          ledger profile --steps 20 --batch 1 --out pr-capture -- \
+            --model "$MODEL" --no-async-scheduling
+
+      - name: Compare against main baseline
+        run: |
+          ledger diff "$BASELINE_DIR" pr-capture \
+            --fail-above 5 --fail-min-ms 0.5 \
+            --out diff.md
+
+      - name: Publish diff report to job summary
+        if: always() && hashFiles('diff.md') != ''
+        run: cat diff.md >> "$GITHUB_STEP_SUMMARY"

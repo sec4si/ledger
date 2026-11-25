@@ -31,7 +31,7 @@ COMMANDS = {
 REPORT_OPTIONS = {
     "analyze": ("--out", "--steps", "--sms", "--peak-tflops"),
     "steps": ("--out",),
-    "diff": ("--out", "--min-ms", "--tolerance"),
+    "diff": ("--out", "--min-ms", "--tolerance", "--fail-above", "--fail-min-ms"),
     "perfetto": ("--out",),
 }
 

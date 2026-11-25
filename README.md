@@ -65,7 +65,7 @@ See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough (including
 | `ledger report` | Re-generate the combined `analyze` + `steps` Markdown report from an existing capture directory. |
 | `ledger analyze` | Per-launch bandwidth, compute floor, same-kernel/same-shape splits, repeated reads, underfilled grids, and top `## Findings`. |
 | `ledger steps` | Step-to-step cycle split (GPU busy, intra-step idle, host idle), speculative yield, KV-cache attention bandwidth, and SM clocks. |
-| `ledger diff` | Compare two captures launch group by launch group past run-to-run clock/power-cap drift, plus token equality. |
+| `ledger diff` | Compare two captures launch group by launch group past run-to-run clock/power-cap drift, plus token equality and `--fail-above` CI gating ([example workflow](docs/ci-diff-gate.yml)). |
 | `ledger perfetto` | Export a capture to Chrome Trace Event JSON (`Steps`, per-CUDA `Stream`, and `Memcpy` tracks) for [ui.perfetto.dev](https://ui.perfetto.dev). |
 | `ledger transfers` | Account for H2D/D2H/D2D memory copies by region, direction, exposed time, and pageable host memory. |
 | `ledger dataflow` | Follow byte-level reads and writes from an access trace (`access/`) to find dead writes, hand-offs, and constant inputs. |

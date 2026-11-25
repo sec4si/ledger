@@ -57,7 +57,34 @@ def tokens_equal(a, b):
     return ta == tb
 
 
-def report(a, b, ceiling, min_ms, tolerance, out):
+def check_gate(busy_a, busy_b, group_deltas, pretty, variants, fail_above, fail_min_ms):
+    """Return regression descriptions that exceed --fail-above (percent).
+
+    A run fails when (a) overall GPU busy per step regresses by more than fail_above percent, or
+    (b) any shared kernel group regresses by more than fail_above percent beyond drift with a
+    beyond-drift increase of at least fail_min_ms ms/step.
+    """
+    failures = []
+    overall_pct = (busy_b / busy_a - 1) * 100
+    if overall_pct > fail_above:
+        failures.append(
+            f"GPU busy per step: {overall_pct:+.1f}% ({busy_a:.2f} → {busy_b:.2f} ms, {busy_b - busy_a:+.2f} ms)"
+        )
+    slow_groups = [
+        (extra, pct, k, ma, mb)
+        for extra, pct, k, ma, mb in group_deltas
+        if pct > fail_above and extra >= fail_min_ms
+    ]
+    for extra, pct, (kname, _grid, what), ma, mb in sorted(slow_groups, key=lambda x: -x[0]):
+        mark = " (other variant)" if (kname, _grid, what) in variants else ""
+        label = f"`{A.short(pretty[kname], 50)}`{mark}"
+        if what:
+            label += f" (`{what}`)"
+        failures.append(f"{label}: {pct:+.1f}% beyond drift ({ma:.2f} → {mb:.2f} ms/step, {extra:+.2f} ms)")
+    return failures
+
+
+def report(a, b, ceiling, min_ms, tolerance, out, fail_above=None, fail_min_ms=0.5):
     ga, sa, busy_a, run_a = groups(a, ceiling)
     gb, sb, busy_b, run_b = groups(b, ceiling)
     pretty = A.demangle([k[0] for k in set(ga) | set(gb)])
@@ -95,13 +122,17 @@ def report(a, b, ceiling, min_ms, tolerance, out):
         emit(f"Generated tokens: {'identical' if same else 'different'}.\n")
 
     changed = []
+    group_deltas = []
     for k in both:
         ma, mb = per(ga[k], sa), per(gb[k], sb)
         ratio = statistics.median(gb[k]) / statistics.median(ga[k])
         # Time per step B would have if only the drift applied; the rest is the change.
         expected = ma * drift * (len(gb[k]) / sb) / (len(ga[k]) / sa)
+        extra = mb - expected
+        pct = (ratio / drift - 1) * 100
+        group_deltas.append((extra, pct, k, ma, mb))
         if abs(mb - ma) >= min_ms and abs(ratio / drift - 1) > tolerance:
-            changed.append((mb - expected, k, ma, mb, ratio))
+            changed.append((extra, k, ma, mb, ratio))
     emit("## Changed beyond drift\n")
     if changed:
         emit("| kernel | grid | streams | launches/step A → B | median us A → B | ms/step A → B | beyond drift ms/step |")
@@ -125,10 +156,23 @@ def report(a, b, ceiling, min_ms, tolerance, out):
                 emit(f"| `{A.short(pretty[kname], 50)}` | {list(grid)} | `{what}` | {len(ours[(kname, grid, what)]) / s:.1f} | {ms:.2f} |")
             emit("")
 
+    failures = []
+    if fail_above is not None:
+        failures = check_gate(busy_a, busy_b, group_deltas, pretty, variants, fail_above, fail_min_ms)
+        emit("## Gate\n")
+        if failures:
+            emit(f"Failed (`--fail-above {fail_above:g}%`, `--fail-min-ms {fail_min_ms:g} ms`):\n")
+            for item in failures:
+                emit(f"- {item}")
+            emit("")
+        else:
+            emit(f"Passed (`--fail-above {fail_above:g}%`, `--fail-min-ms {fail_min_ms:g} ms`).\n")
+
     text = "\n".join(lines)
     if out:
         open(out, "w").write(text)
     print(text)
+    return failures
 
 
 def main():
@@ -138,9 +182,19 @@ def main():
     ap.add_argument("--ceiling-gbps", type=float, required=True)
     ap.add_argument("--min-ms", type=float, default=0.05, help="smallest change per step to report")
     ap.add_argument("--tolerance", type=float, default=0.03, help="departure from the drift to report")
+    ap.add_argument("--fail-above", type=float, default=None,
+                    help="exit non-zero if step time or a shared kernel group regresses by more than this percent")
+    ap.add_argument("--fail-min-ms", type=float, default=0.5,
+                    help="minimum beyond-drift ms/step increase for a kernel group to trigger --fail-above")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    report(a.a, a.b, a.ceiling_gbps, a.min_ms, a.tolerance, a.out)
+    if a.fail_above is not None and a.fail_above < 0:
+        ap.error("--fail-above must be non-negative")
+    if a.fail_min_ms < 0:
+        ap.error("--fail-min-ms must be non-negative")
+    failures = report(a.a, a.b, a.ceiling_gbps, a.min_ms, a.tolerance, a.out, a.fail_above, a.fail_min_ms)
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
