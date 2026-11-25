@@ -231,3 +231,20 @@ def test_analyze_drops_untimed_kernels_and_markers(captures, tmp_path, capsys):
     assert "over 3 steps," in text
     assert dict(table_rows(section(text, "Step")))["wall time (first launch to last)"] == base_wall
     assert re.search(r"dropped 3 of \d+ kernel records without timestamps", err)
+
+
+def test_act_bytes_counts_input_and_output_of_linear_layers():
+    """A linear layer's GEMM moves its M x K input in the weight's precision and its M x N output in
+    BF16; weights without recorded widths (embeddings, MoE experts) move no counted activations."""
+    def row(dtype, **widths):
+        w = {"name": "model.layers.0.mlp.down_proj.weight", "shape": [5120, 17408], "dtype": dtype, **widths}
+        return {"weights": [w]}
+
+    prefill = {"batch": 1, "prefill": 4096}
+    fp8 = row("float8_e4m3fn", in_features=17408, out_features=5120)
+    assert analyze.act_bytes(fp8, prefill) == 4096 * (17408 * 1 + 5120 * 2)
+    fp4 = row("uint8", in_features=17408, out_features=5120)
+    assert analyze.act_bytes(fp4, prefill) == 4096 * (17408 // 2 + 5120 * 2)
+    decode = {"batch": 4, "draft_tokens": 3}
+    assert analyze.act_bytes(fp8, decode) == 16 * (17408 + 5120 * 2)
+    assert analyze.act_bytes(row("bfloat16"), prefill) == 0

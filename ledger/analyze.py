@@ -257,7 +257,8 @@ def precision(dtype):
 
 def gemm_flops(r, run):
     """2 * M * elements of the streamed weight, M the rows the launch multiplies: in a prefill step the
-    prompt (the draft layers run over it too), in decode batch * (1 + draft tokens) for the main model
+    prompt (the draft layers run over it too) shared among the launches that stream the weight in the
+    step (a GEMM split into row slices), in decode batch * (1 + draft tokens) for the main model
     and batch for a draft step. The vocabulary projection only runs over the positions that are
     sampled: batch in a prefill or draft step. vLLM's layout; other engines may differ."""
     w = r["weights"][0]
@@ -266,12 +267,26 @@ def gemm_flops(r, run):
     batch, prefill = run.get("batch", 1), run.get("prefill", 0)
     sampled = "lm_head" in w["name"]
     if prefill:
-        m = batch if sampled else prefill
+        m = batch if sampled else round(prefill / r.get("slices", 1))
     elif r.get("draft"):
         m = batch
     else:
         m = batch * (1 + run.get("draft_tokens", 0))
     return cls, m, 2 * m * elements
+
+
+ACT_BYTES = {"fp8": 1, "bf16": 2, "fp4": 0.5}  # input activation element, by the weight's compute class
+
+
+def act_bytes(r, run):
+    """Activation bytes a weight GEMM moves at least once: the M x K input, in the weight's precision
+    (quantized first for FP8 and FP4), and the M x N output in BF16. Needs the layer widths the vLLM
+    regions exporter records for linear layers; 0 for other weights (embeddings, MoE experts)."""
+    w = r["weights"][0]
+    if "in_features" not in w:
+        return 0
+    cls, m, _ = gemm_flops(r, run)
+    return m * (w["in_features"] * ACT_BYTES.get(cls, 2) + w["out_features"] * 2)
 
 
 def weight_finding(name, rs, t, b, steps, ceiling, peaks, run):
@@ -292,6 +307,15 @@ def weight_finding(name, rs, t, b, steps, ceiling, peaks, run):
         return None
     return lost, (f"`{name}` runs at {floor / t * 100:.0f}% of its {what} floor, {lost:.2f} ms per step "
                   "short of it (Weight-streaming launches by weight)")
+
+
+def compute_bound(r, ceiling, peaks, run):
+    """Whether a weight launch's compute floor is above its bandwidth floor; without a peak for its
+    precision, whether it multiplies more than 64 rows."""
+    cls, m, flops = gemm_flops(r, run)
+    if peaks and cls in peaks:
+        return flops / peaks[cls] / 1e6 > r["bytes"] / ceiling / 1e3
+    return m > 64
 
 
 def weight_key(r):
@@ -320,14 +344,23 @@ def window_steps(capture):
 def report(capture, ceiling, steps, out, peaks=None, sms=None):
     rows, unresolved, n_regions = build(capture, ceiling)
     run = load_run(capture)
-    split_steps(rows)  # marks draft launches
+    _, step_rows = split_steps(rows)  # marks draft launches
     rows = [r for r in rows if MARKER not in r["name"]]
+    for step in step_rows or [rows]:
+        slices = Counter(r["weights"][0]["name"] for r in step if r["weights"])
+        for r in step:
+            if r["weights"]:
+                r["slices"] = slices[r["weights"][0]["name"]] / (1 if step_rows else steps)
+    for r in rows:
+        r["act_bytes"] = act_bytes(r, run) if r["weights"] else 0
+        r["bytes"] = r["weight_bytes"] + r["act_bytes"]
     sms = sms or run.get("sms")
     pretty = demangle([r["name"] for r in rows])
     if not rows:
         raise SystemExit("no kernel records in range")
     span, busy = busy_and_gaps(rows)
-    total_bytes = sum(r["weight_bytes"] for r in rows)
+    weight_total = sum(r["weight_bytes"] for r in rows)
+    total_bytes = sum(r["bytes"] for r in rows)
     lines = []
     emit = lines.append
     findings = []  # (ms per step, text): the largest costs found below, listed first
@@ -345,7 +378,8 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
     emit(f"| GPU busy | {busy / steps / 1e6:.2f} ms |")
     emit(f"| idle between kernels | {(span - busy) / steps / 1e6:.2f} ms ({(span - busy) / span * 100:.1f}%) |")
     emit(f"| launches | {len(rows) / steps:.0f} |")
-    emit(f"| weight bytes streamed | {total_bytes / steps / 1e9:.2f} GB |")
+    emit(f"| weight bytes streamed | {weight_total / steps / 1e9:.2f} GB |")
+    emit(f"| activation bytes of linear layers | {(total_bytes - weight_total) / steps / 1e9:.2f} GB |")
     emit(f"| effective bandwidth | {total_bytes / busy:.0f} GB/s ({total_bytes / busy / ceiling * 100:.0f}% of ceiling) |")
     emit(f"| floor at ceiling | {total_bytes / steps / ceiling / 1e6:.2f} ms |\n")
 
@@ -355,13 +389,13 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
         if r["weight_bytes"] >= 1 << 20:
             groups[weight_key(r)].append(r)
     emit("## Weight-streaming launches by weight\n")
-    emit("| weight | shape | dtype | launches/step | avg us | MB | GB/s | % ceiling | lost ms/step |")
-    emit("|---|---|---|---|---|---|---|---|---|")
+    emit("| weight | shape | dtype | launches/step | avg us | MB | act MB | GB/s | % ceiling | lost ms/step |")
+    emit("|---|---|---|---|---|---|---|---|---|---|")
     lost_rows = []
     for key, rs in groups.items():
         t = statistics.mean(r["us"] for r in rs)
-        b = statistics.mean(r["weight_bytes"] for r in rs)
-        lost = sum(r["us"] - r["weight_bytes"] / ceiling / 1e3 for r in rs) / steps / 1e3
+        b = statistics.mean(r["bytes"] for r in rs)
+        lost = sum(r["us"] - r["bytes"] / ceiling / 1e3 for r in rs) / steps / 1e3
         lost_rows.append((lost, key, rs, t, b))
     unjudged = 0
     for lost, key, rs, t, b in sorted(lost_rows, key=lambda x: -x[0]):
@@ -370,8 +404,9 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
         if finding:
             findings.append(finding)
         unjudged += finding is None and gemm_flops(rs[0], run)[1] > 64 and not peaks
-        emit(f"| `{key[0]}` | {list(key[1])} | {key[2]} | {len(rs) / steps:.1f} | {t:.1f} | {b / 1e6:.1f} | "
-             f"{gbps:.0f} | {gbps / ceiling * 100:.0f}% | {lost:.2f} |")
+        act = statistics.mean(r["act_bytes"] for r in rs)
+        emit(f"| `{key[0]}` | {list(key[1])} | {key[2]} | {len(rs) / steps:.1f} | {t:.1f} | {(b - act) / 1e6:.1f} | "
+             f"{act / 1e6:.1f} | {gbps:.0f} | {gbps / ceiling * 100:.0f}% | {lost:.2f} |")
     emit("")
     if unjudged:
         findings.append((0, f"{unjudged} weight groups multiply more than 64 rows; pass --peak-tflops to judge "
@@ -423,25 +458,26 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
     # Repeated reads of the same weight within a step.
     emit("## Weights read more than once per step\n")
     reads = Counter()
-    size = {}
+    last = {}
     for r in rows:
         if r["weights"]:
-            w = r["weights"][0]
-            reads[w["name"]] += 1
-            size[w["name"]] = w["size"]
-    folded = defaultdict(lambda: [0, 0, 0.0])  # group -> tensors, bytes each, reads per tensor per step
+            reads[r["weights"][0]["name"]] += 1
+            last[r["weights"][0]["name"]] = r
+    folded = defaultdict(lambda: [0, False, 0.0])  # group -> tensors, compute-bound, reads per tensor per step
     for n, c in reads.items():
-        per = c / steps
-        if per > 1.5 and size[n] >= 1 << 20:
-            f = folded[(group_name(n), size[n])]
+        per, size = c / steps, last[n]["weights"][0]["size"]
+        if per > 1.5 and size >= 1 << 20:
+            f = folded[(group_name(n), size)]
             f[0] += 1
+            f[1] = f[1] or compute_bound(last[n], ceiling, peaks, run)
             f[2] = max(f[2], per)
     if folded:
         emit("| weight | tensors | MB each | reads/step | extra GB/step |\n|---|---|---|---|---|")
-        for (n, sz), (cnt, _, per) in sorted(folded.items(), key=lambda kv: -kv[1][0] * kv[0][1] * (kv[1][2] - 1)):
+        for (n, sz), (cnt, bound, per) in sorted(folded.items(), key=lambda kv: -kv[1][0] * kv[0][1] * (kv[1][2] - 1)):
             extra_bytes = cnt * (per - 1) * sz
             emit(f"| `{n}` | {cnt} | {sz / 1e6:.1f} | {per:.1f} | {extra_bytes / 1e9:.2f} |")
-            if extra_bytes / ceiling / 1e6 >= 0.5:
+            # A compute-bound GEMM split into row slices rereads its weight under its compute time.
+            if extra_bytes / ceiling / 1e6 >= 0.5 and not bound:
                 findings.append((extra_bytes / ceiling / 1e6, f"`{n}` is read {per:.1f} times per step; the extra "
                                  f"{extra_bytes / 1e9:.2f} GB cost at least that long at the ceiling (Weights read more than once)"))
     else:
@@ -521,7 +557,7 @@ def underfilled(rows, steps, sms, pretty, emit):
         ms = sum(r["us"] for r in rs) / steps / 1e3
         w = Counter(group_name(r["weights"][0]["name"]) for r in rs if r["weights"])
         streams = f"`{w.most_common(1)[0][0]}`" if w else ""
-        nbytes, us = sum(r["weight_bytes"] for r in rs), sum(r["us"] for r in rs)
+        nbytes, us = sum(r["bytes"] for r in rs), sum(r["us"] for r in rs)
         gbps = f"{nbytes / us / 1e3:.0f}" if nbytes >= len(rs) << 20 else ""
         emit(f"| `{short(pretty[name], 60)}` | {list(grid)} | {math.prod(grid)} | {len(rs) / steps:.1f} | "
              f"{statistics.median(r['us'] for r in rs):.1f} | {ms:.2f} | {sum(r['alone'] for r in rs) / steps / 1e3:.2f} | "
@@ -529,7 +565,7 @@ def underfilled(rows, steps, sms, pretty, emit):
     emit("")
     out = []
     for ms, (name, grid), rs in found:
-        nbytes, us = sum(r["weight_bytes"] for r in rs), sum(r["us"] for r in rs)
+        nbytes, us = sum(r["bytes"] for r in rs), sum(r["us"] for r in rs)
         out.append((ms, name, grid, nbytes / us / 1e3 if nbytes >= len(rs) << 20 else None))
     return out
 
@@ -551,7 +587,7 @@ def compute(rows, steps, ceiling, peaks, run, emit):
     lines = []
     for ((name, _shape, _dtype), cls, m), items in groups.items():
         t = statistics.mean(r["us"] for r, _ in items)
-        b = statistics.mean(r["weight_bytes"] for r, _ in items)
+        b = statistics.mean(r["bytes"] for r, _ in items)
         f = statistics.mean(fl for _, fl in items)
         mem_us = b / ceiling / 1e3
         comp_us = f / peaks[cls] / 1e6 if cls in peaks else None

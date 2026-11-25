@@ -85,9 +85,13 @@ See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough (including
 
 ## Limits
 
-- Byte counts take each referenced weight as read once per launch and ignore activations and
-  cache traffic. That is accurate for decode with a handful of tokens per step and wrong for
-  prefill or large batches.
+- Byte counts take each referenced weight as read once per launch, and add the activations of
+  linear layers (the M x K input once, in the weight's precision, and the M x N BF16 output) when
+  the regions record the layer's widths (the vLLM exporter does). MoE experts, embeddings and
+  attention are counted by weight only; `ledger steps` judges attention against its KV reads. The
+  count is the least traffic a launch needs: on GB10, ncu measured output writes within 1% of it,
+  and reads within 10% for GEMMs whose operands fit in L2 but 2.5 to 7 times it for prefill-sized
+  ones, which reread tiles of A and the weight.
 - Pointers are found by scanning parameter bytes for addresses inside known regions. Kernels that
   take pointers indirectly (pointer arrays in device memory) are invisible to it.
 - A runtime that loads modules context-independently launches through the driver with a `CUkernel`

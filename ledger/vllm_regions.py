@@ -50,6 +50,19 @@ def dump_regions(worker, out_dir):
     model = getattr(runner, "model", None) or runner.get_model()
     for name, t in model.named_parameters():
         add("weight", name, t)
+    # Linear layers: the input and output width of this rank's slice, so the analysis can count the
+    # activations a GEMM reads and writes besides its weight.
+    from vllm.model_executor.layers.linear import LinearBase
+
+    widths = {}
+    for mod_name, mod in model.named_modules():
+        if isinstance(mod, LinearBase):
+            k, n = mod.input_size_per_partition, mod.output_size_per_partition
+            for p_name, _ in mod.named_parameters(recurse=False):
+                widths[f"{mod_name}.{p_name}" if mod_name else p_name] = (k, n)
+    for r in regions:
+        if r["name"] in widths:
+            r["in_features"], r["out_features"] = widths[r["name"]]
     for name, t in model.named_buffers():
         add("buffer", name, t)
 
