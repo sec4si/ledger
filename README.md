@@ -44,7 +44,7 @@ Ledger is part of the [sec4si](https://sec4.si) research ecosystem.
 In the Python environment with `vllm` and CUDA `torch`:
 
 ```sh
-pip install -e .                                      # once published: pip install sec4si-ledger
+pip install kernel-ledger                             # or, from a checkout: pip install -e .
 ledger build
 ledger ceilings                                       # run with the GPU idle
 ledger profile --steps 20 --out run1 -- --model <model> [vLLM args...]

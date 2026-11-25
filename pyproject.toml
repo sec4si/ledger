@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ledger"
+name = "kernel-ledger"
 version = "0.1.0"
 description = "Per-launch accounting for LLM inference on GPUs"
 readme = "README.md"

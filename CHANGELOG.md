@@ -14,15 +14,17 @@ Initial release of Ledger: per-launch accounting for LLM inference on GPUs.
 - `ledger profile` to capture a vLLM run and write both `<out>/report.md` and `<out>/trace.json`.
 - vLLM `vllm.general_plugins` entry point (`ledger.vllm_plugin`) for profiling live `vllm serve`
   instances.
+- SGLang `sglang.srt.plugins` entry point (`ledger.sglang_plugin`) for profiling `sglang serve`.
 
 ### Analysis and visualization
 - `ledger analyze`: top `## Findings` summary, step bandwidth floor, per-weight efficiency,
   same-kernel/same-shape splits with preceding cache-touching kernel attribution, repeated weight
-  reads, underfilled SM launches, and compute-vs-memory floors (`--peak-tflops`).
+  reads, underfilled SM launches, and compute-vs-memory floors (`--peak-tflops`). Linear-layer
+  activations are counted with the weights.
 - `ledger steps`: step-to-step cycle breakdown (GPU busy, intra-step idle, host idle), speculative
   decoding yield, KV-cache attention bandwidth, and SM clock/temperature tracking.
 - `ledger diff`: launch-group comparison past run-to-run clock/power-cap drift, template-variant
-  pairing, and generated token equality checks.
+  pairing, and generated token equality checks; `--fail-above` makes it a CI regression gate.
 - `ledger report`: re-generate the combined `analyze` + `steps` report from an existing capture.
 - `ledger perfetto`: Chrome Trace Event JSON export (`Steps`, per-CUDA `Stream` with automatic
   concurrency lanes, and `Memcpy` tracks) for Perfetto UI.
