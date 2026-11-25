@@ -104,8 +104,24 @@ def parse_measurements(device, bandwidth, compute):
     raise SystemExit("ledger: could not read valid bandwidth and compute ceilings from the benchmarks.")
 
 
+def other_gpu_processes():
+    """Processes other than this one that hold a CUDA context, as "pid name" strings. A ceiling
+    measured next to them is too low and would be cached; nvidia-smi missing means no check."""
+    try:
+        out = subprocess.check_output(["nvidia-smi", "--query-compute-apps=pid,process_name",
+                                       "--format=csv,noheader"], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    rows = [line.split(",", 1) for line in out.splitlines() if line.strip()]
+    return [f"{pid.strip()} {name.strip()}" for pid, name in rows if pid.strip() != str(os.getpid())]
+
+
 def measure(device):
     """Run the checked-in benchmarks and cache their measured peaks."""
+    others = other_gpu_processes()
+    if others:
+        raise SystemExit("ledger: other processes are using the GPU, so the ceilings would come out low and "
+                         "be cached:\n  " + "\n  ".join(others) + "\nRun 'ledger ceilings' when the GPU is idle.")
     compiler = cuda_nvcc()
     with tempfile.TemporaryDirectory(prefix="ledger-ceilings-") as directory:
         binary = Path(directory) / "bwtest"
