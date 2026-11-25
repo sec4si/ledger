@@ -190,6 +190,7 @@ def build(capture, ceiling):
                 "us": us,
                 "name": k["name"],
                 "grid": tuple(k["grid"]),
+                "stream": k.get("stream", 0),
                 "weights": [] if partial else streamed,
                 "weight_bytes": 0 if partial else nbytes,
                 "partial": [w["name"] for w in streamed] if partial else [],
