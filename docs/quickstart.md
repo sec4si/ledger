@@ -1,0 +1,135 @@
+# Quickstart
+
+The shortest path from a clean checkout to a per-launch report, a Perfetto timeline, and an A/B
+diff on vLLM.
+
+## 1. Install
+
+Run inside the Python environment where `vllm` and CUDA-enabled `torch` are installed (with `nvcc`
+on `PATH` or `CUDA_HOME` set):
+
+```sh
+pip install -e .
+```
+
+If you also plan to use the access-trace tools (`dataflow`, `dead-across`, `traffic`,
+`perturb-plan`, `perturb-report`), install the optional `numpy` extra:
+
+```sh
+pip install -e '.[dataflow]'
+```
+
+## 2. Build the capture library
+
+```sh
+ledger build
+```
+
+This compiles `capture/libledger.so` against your CUDA toolkit and caches it under
+`~/.cache/ledger/build/` (printing the full path). Pass `--access` (and optionally `--arch <sm>`)
+only if you also need the Compute Sanitizer access tracer.
+
+## 3. Measure the GPU ceilings once
+
+Make sure **no other process is using the GPU** — `ledger ceilings` checks `nvidia-smi` and refuses
+to measure if another CUDA context is active, so noisy numbers do not get cached.
+
+```sh
+ledger ceilings
+```
+
+This runs `bench/bwtest.cu` and `bench/flops.py`, prints the measured DRAM read bandwidth and GEMM
+peaks, and caches them in `~/.cache/ledger/ceilings-<device>.json`. Subsequent `ledger analyze`,
+`ledger steps`, and `ledger diff` calls load this cache automatically. Use `ledger ceilings --refresh`
+to re-measure.
+
+## 4. Profile a vLLM run
+
+```sh
+ledger profile --steps 20 --out run1 -- --model <model> [vLLM args...]
+```
+
+`--out` must be a new or empty directory. Optional flags before `--`: `--steps` (default 40),
+`--batch` (default 1), `--prompt-tokens` (default 0), and `--prefill` (default 0). Everything after
+`--` is passed straight to vLLM.
+
+When the run finishes, `run1/` contains the raw CUPTI capture, `run1/vllm.log`, and the combined
+`analyze` + `steps` report in `run1/report.md`.
+
+## 5. Read the report
+
+Open `run1/report.md` and start with **`## Findings`** at the top: it ranks up to the five largest
+costs in ms per step, each as an upper bound on what fixing it could save. Follow the section name
+in parentheses for the full table and evidence. See [Reading Ledger Reports](reading-reports.md)
+for how to interpret every section and confirm a finding.
+
+## 6. Inspect the timeline in Perfetto
+
+Export the capture to Chrome Trace Event JSON:
+
+```sh
+python -m ledger.perfetto run1 --out run1.json
+```
+
+Pass `--ceiling-gbps <measured>` if you also want per-launch `gbps`, `pct_ceiling`, and
+partial-read filtering (such as embedding gathers) in the trace. Open
+[ui.perfetto.dev](https://ui.perfetto.dev) and load `run1.json` to inspect the `Steps`, per-CUDA
+`Stream`, and `Memcpy` tracks.
+
+## 7. Compare before and after
+
+After changing a kernel, backend, or flag, capture a second run and diff the two:
+
+```sh
+ledger profile --steps 20 --out run2 -- --model <model> [updated vLLM args...]
+ledger diff run1 run2
+```
+
+`ledger diff` uses the cached ceilings, estimates run-to-run clock/power-cap drift from shared
+launch groups, and lists only the groups that moved beyond that drift.
+
+---
+
+## Profiling `vllm serve` with the plugin (hardware verification in progress)
+
+> **Note:** The `vllm serve` plugin path is still being verified on hardware.
+
+`pip install -e .` registers `ledger.vllm_plugin:register` under the `vllm.general_plugins` entry
+point. When `LEDGER_OUT` is unset it does nothing. To capture a window from a live `vllm serve`
+instance:
+
+```sh
+LEDGER_OUT=out LEDGER_GRAPH_WINDOW=<skip>:<take> LD_PRELOAD=$(ledger build) \
+  vllm serve <model> [vLLM args...]
+```
+
+Send requests while the graph-launch window (`<skip>` skipped, `<take>` captured) is open, and keep
+the server running until the window closes (kernels still in flight when the window closes get
+bogus end times, so capture one step more than you need and drop the last). Each GPU worker exports
+`regions-<pid>.json`, `attention-<pid>.json`, and `run.json` after warm-up and emits a step marker
+at every `execute_model` call.
+
+Then analyze the capture with `ledger analyze out`: it counts steps from the markers automatically.
+Because serving batch size varies from step to step, `run.json` has no fixed `batch` or `steps`, so
+the `Compute` section (which needs `M`) applies only when steps have a known shape.
+
+---
+
+## Other CUDA programs and Sibyl replays
+
+Any CUDA program works with the capture library directly:
+
+1. Preload `libledger.so` (`LD_PRELOAD=$(ledger build) LEDGER_OUT=out`).
+2. Bracket the window with `cudaProfilerStart` / `cudaProfilerStop`, or set
+   `LEDGER_GRAPH_WINDOW=<skip>:<take>` if the program never calls the profiler API. For programs
+   that `fork()` one process per GPU, set `LEDGER_INIT_IN_CHILD=1` so each child starts CUPTI
+   itself (CUPTI worker threads do not survive `fork()`).
+3. Export the memory map as `out/regions-<pid>.json` (a list of
+   `{kind, name, addr, size, shape, dtype}`; see `ledger/vllm_regions.py`).
+
+For a [Sibyl](https://github.com/GeetoRinku/sibyl) replay, which preserves recorded addresses:
+
+```sh
+ledger sibyl-regions <recording>/ranges-rank0-<pid>.json out
+LD_PRELOAD=$(ledger build) LEDGER_OUT=out LEDGER_GRAPH_WINDOW=8:44 <replay program> ...
+```
