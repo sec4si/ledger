@@ -132,6 +132,30 @@ the `Compute` section (which needs `M`) applies only when steps have a known sha
 
 ---
 
+## Profiling SGLang serve
+
+Install Ledger in the same environment as SGLang. The plugin uses the SGLang Runtime
+general plugin entry point (`sglang.srt.plugins`, verified with SGLang 0.5.23) and only
+activates when `LEDGER_OUT` is set. For a single-GPU server with CUDA graphs enabled:
+
+```sh
+ledger build
+capture_lib=$(ledger build)
+LEDGER_OUT=sglang-out LEDGER_GRAPH_WINDOW=16:32 LD_PRELOAD="$capture_lib" \
+  sglang serve --model-path <model>
+```
+
+Use a fresh output directory. Send requests with enough generated tokens to reach the end
+of the graph-launch window while the server is still running. Adjust the skip and length
+for your workload. Each CUDA worker writes a parameter and KV pool map after initialization.
+Token-major KV views also include per-layer addresses and bytes per token. The target
+model emits one step marker per forward, including when it replays a CUDA graph.
+
+Run `ledger report sglang-out` and `ledger perfetto sglang-out --out sglang-out/trace.json` to
+inspect the capture. The report uses the measured bandwidth cache or `--ceiling-gbps`.
+
+---
+
 ## Other CUDA programs and Sibyl replays
 
 Any CUDA program works with the capture library directly:

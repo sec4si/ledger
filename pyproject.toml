@@ -18,6 +18,9 @@ ledger = "ledger.cli:main"
 [project.entry-points."vllm.general_plugins"]
 ledger = "ledger.vllm_plugin:register"
 
+[project.entry-points."sglang.srt.plugins"]
+ledger = "ledger.sglang_plugin:register"
+
 [tool.setuptools]
 packages = ["ledger", "ledger._capture", "ledger._access", "ledger._bench", "ledger._examples"]
 
