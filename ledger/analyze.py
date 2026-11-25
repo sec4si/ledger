@@ -35,6 +35,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 from collections import Counter, defaultdict
 
 
@@ -149,7 +150,14 @@ def load(capture):
     for r in read_jsonl(os.path.join(capture, "launches-*.jsonl")):
         if r["params"] or r["corr"] not in direct:
             direct[r["corr"]] = r
-    kernels = sorted(read_jsonl(os.path.join(capture, "kernels-*.jsonl")), key=lambda k: k["start"])
+    kernels = list(read_jsonl(os.path.join(capture, "kernels-*.jsonl")))
+    # Kernels still in flight when the window closes (a launch-count window under load) come back
+    # with zero timestamps; one of them would stretch the window back to the epoch.
+    timed = [k for k in kernels if 0 < k["start"] <= k["end"]]
+    if len(timed) < len(kernels):
+        print(f"ledger: dropped {len(kernels) - len(timed)} of {len(kernels)} kernel records without "
+              "timestamps (still running when the window closed)", file=sys.stderr)
+    kernels = sorted(timed, key=lambda k: k["start"])
     return mem, nodes, clones, direct, kernels
 
 
@@ -303,7 +311,7 @@ def window_steps(capture):
     steps = load_run(capture).get("steps")
     if steps:
         return steps
-    steps = sum(MARKER in k["name"] for k in read_jsonl(os.path.join(capture, "kernels-*.jsonl")))
+    steps = sum(MARKER in k["name"] and k["start"] > 0 for k in read_jsonl(os.path.join(capture, "kernels-*.jsonl")))
     if not steps:
         raise SystemExit(f"{capture}: no step count in run.json and no step markers; pass --steps")
     return steps

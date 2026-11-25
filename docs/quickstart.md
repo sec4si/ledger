@@ -105,9 +105,8 @@ ledger report run1 [--out path/to/report.md]
 
 ---
 
-## Profiling `vllm serve` with the plugin (hardware verification in progress)
+## Profiling `vllm serve` with the plugin
 
-> **Note:** The `vllm serve` plugin path is still being verified on hardware.
 
 `pip install -e .` registers `ledger.vllm_plugin:register` under the `vllm.general_plugins` entry
 point. When `LEDGER_OUT` is unset it does nothing. To capture a window from a live `vllm serve`
@@ -119,12 +118,15 @@ LEDGER_OUT=out LEDGER_GRAPH_WINDOW=<skip>:<take> LD_PRELOAD=$(ledger build) \
 ```
 
 Send requests while the graph-launch window (`<skip>` skipped, `<take>` captured) is open, and keep
-the server running until the window closes (kernels still in flight when the window closes get
-bogus end times, so capture one step more than you need and drop the last). Each GPU worker exports
+the server running until the window closes. Kernels still running when it closes come back without
+timestamps; the analysis drops them and says how many. Each GPU worker exports
 `regions-<pid>.json`, `attention-<pid>.json`, and `run.json` after warm-up and emits a step marker
 at every `execute_model` call.
 
-Then analyze the capture with `ledger analyze out`: it counts steps from the markers automatically.
+Then write the report with `ledger report out` (or `ledger analyze out`): it counts steps from the
+markers automatically. On a GB10 with vLLM main, Qwen3.8-27B NVFP4 with MTP,
+`LEDGER_GRAPH_WINDOW=300:200` and `vllm bench serve` sending 32 requests at concurrency 4 gave a
+window of 49 steps.
 Because serving batch size varies from step to step, `run.json` has no fixed `batch` or `steps`, so
 the `Compute` section (which needs `M`) applies only when steps have a known shape.
 
