@@ -40,8 +40,8 @@ ledger ceilings
 
 This runs `bench/bwtest.cu` and `bench/flops.py`, prints the measured DRAM read bandwidth and GEMM
 peaks, and caches them in `~/.cache/ledger/ceilings-<device>.json`. Subsequent `ledger analyze`,
-`ledger steps`, and `ledger diff` calls load this cache automatically. Use `ledger ceilings --refresh`
-to re-measure.
+`ledger steps`, `ledger diff`, `ledger report`, and `ledger perfetto` calls load this cache
+automatically. Use `ledger ceilings --refresh` to re-measure.
 
 ## 4. Profile a vLLM run
 
@@ -53,8 +53,9 @@ ledger profile --steps 20 --out run1 -- --model <model> [vLLM args...]
 `--batch` (default 1), `--prompt-tokens` (default 0), and `--prefill` (default 0). Everything after
 `--` is passed straight to vLLM.
 
-When the run finishes, `run1/` contains the raw CUPTI capture, `run1/vllm.log`, and the combined
-`analyze` + `steps` report in `run1/report.md`.
+When the run finishes, `run1/` contains the raw CUPTI capture, `run1/vllm.log`, the combined
+`analyze` + `steps` report in `run1/report.md`, and the Perfetto timeline in `run1/trace.json`
+(printing the URL to open it).
 
 ## 5. Read the report
 
@@ -65,16 +66,19 @@ for how to interpret every section and confirm a finding.
 
 ## 6. Inspect the timeline in Perfetto
 
-Export the capture to Chrome Trace Event JSON:
+`ledger profile` already wrote `run1/trace.json`. Open [ui.perfetto.dev](https://ui.perfetto.dev)
+and load `run1/trace.json` to inspect the `Steps`, per-CUDA `Stream`, and `Memcpy` tracks.
+
+To export a timeline from an existing capture later (for example, one captured with `vllm serve` or
+another engine):
 
 ```sh
-python -m ledger.perfetto run1 --out run1.json
+ledger perfetto run1 --out run1.json
 ```
 
-Pass `--ceiling-gbps <measured>` if you also want per-launch `gbps`, `pct_ceiling`, and
-partial-read filtering (such as embedding gathers) in the trace. Open
-[ui.perfetto.dev](https://ui.perfetto.dev) and load `run1.json` to inspect the `Steps`, per-CUDA
-`Stream`, and `Memcpy` tracks.
+`ledger perfetto` fills in `--ceiling-gbps` from the GPU cache automatically when available (pass
+`--ceiling-gbps <measured>` explicitly on a machine without a cache to include per-launch `gbps`,
+`pct_ceiling`, and partial-read filtering).
 
 ## 7. Compare before and after
 
@@ -87,6 +91,17 @@ ledger diff run1 run2
 
 `ledger diff` uses the cached ceilings, estimates run-to-run clock/power-cap drift from shared
 launch groups, and lists only the groups that moved beyond that drift.
+
+## 8. Re-generate a report from an existing capture
+
+After upgrading or modifying Ledger, you do not need to re-run the GPU to refresh the report:
+
+```sh
+ledger report run1 [--out path/to/report.md]
+```
+
+`ledger report` re-runs `analyze` and `steps` over the saved capture using the cached ceilings
+(or explicit `--ceiling-gbps` / `--peak-tflops`) and writes `<capture>/report.md` by default.
 
 ---
 

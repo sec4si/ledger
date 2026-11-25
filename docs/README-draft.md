@@ -45,9 +45,9 @@ ledger ceilings                                       # run with the GPU idle
 ledger profile --steps 20 --out run1 -- --model <model> [vLLM args...]
 ```
 
-Open `run1/report.md` starting at `## Findings`, export a timeline with
-`python -m ledger.perfetto run1 --out run1.json`, and compare two runs with
-`ledger diff run1 run2`. See [docs/quickstart.md](quickstart.md) for the full walkthrough (including
+Open `run1/report.md` starting at `## Findings`, load `run1/trace.json` in
+[ui.perfetto.dev](https://ui.perfetto.dev), and compare two runs with `ledger diff run1 run2`.
+See [docs/quickstart.md](quickstart.md) for the full walkthrough (including `ledger report`,
 `vllm serve` plugin usage, non-vLLM CUDA programs, and Sibyl replays).
 
 ## Tools
@@ -56,11 +56,12 @@ Open `run1/report.md` starting at `## Findings`, export a timeline with
 |---|---|
 | `ledger build` | Compile `capture/libledger.so` (and with `--access`, the Compute Sanitizer tracer) against the local CUDA toolkit. |
 | `ledger ceilings` | Measure and cache GPU DRAM read bandwidth (`bench/bwtest.cu`) and GEMM TFLOP/s (`bench/flops.py`). |
-| `ledger profile` | Capture a vLLM run under CUPTI and write the combined `analyze` + `steps` report to `<out>/report.md`. |
+| `ledger profile` | Capture a vLLM run under CUPTI and write `<out>/report.md` (`analyze` + `steps`) and `<out>/trace.json`. |
+| `ledger report` | Re-generate the combined `analyze` + `steps` Markdown report from an existing capture directory. |
 | `ledger analyze` | Per-launch bandwidth, compute floor, same-kernel/same-shape splits, repeated reads, underfilled grids, and top `## Findings`. |
 | `ledger steps` | Step-to-step cycle split (GPU busy, intra-step idle, host idle), speculative yield, KV-cache attention bandwidth, and SM clocks. |
 | `ledger diff` | Compare two captures launch group by launch group past run-to-run clock/power-cap drift, plus token equality. |
-| `python -m ledger.perfetto` | Export a capture to Chrome Trace Event JSON (`Steps`, per-CUDA `Stream`, and `Memcpy` tracks) for [ui.perfetto.dev](https://ui.perfetto.dev). |
+| `ledger perfetto` | Export a capture to Chrome Trace Event JSON (`Steps`, per-CUDA `Stream`, and `Memcpy` tracks) for [ui.perfetto.dev](https://ui.perfetto.dev). |
 | `ledger transfers` | Account for H2D/D2H/D2D memory copies by region, direction, exposed time, and pageable host memory. |
 | `ledger dataflow` | Follow byte-level reads and writes from an access trace (`access/`) to find dead writes, hand-offs, and constant inputs. |
 | `ledger dead-across` | Split dead writes across multiple traces into fixed (droppable), moving (input-dependent), and varying. |
