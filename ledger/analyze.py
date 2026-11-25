@@ -4,6 +4,8 @@ books per launch.
     python -m ledger.analyze <capture dir> --ceiling-gbps 252 [--steps 40] [--out report.md]
 
 What it reports
+  * findings: the largest costs found below, ranked by time per step, each against its reference
+    (the bandwidth or compute floor, an idle SM's share, a faster twin of the same kernel);
   * step summary: time, GPU busy time, idle gaps, launches, weight bytes and effective bandwidth;
   * per weight group (layer index folded): how close each weight-streaming launch runs to the
     measured bandwidth ceiling;
@@ -263,6 +265,26 @@ def gemm_flops(r, run):
     return cls, m, 2 * m * elements
 
 
+def weight_finding(name, rs, t, b, steps, ceiling, peaks, run):
+    """(ms per step, text) for a weight group well short of its floor: the bandwidth floor, or with
+    peaks the larger of the bandwidth and compute floors. None when it is close, or when it multiplies
+    more than 64 rows and no peaks were given (it may be compute-bound)."""
+    cls, m, flops = gemm_flops(rs[0], run)
+    mem_us = b / ceiling / 1e3
+    if peaks and cls in peaks:
+        comp_us = flops / peaks[cls] / 1e6
+        floor, what = max(mem_us, comp_us), "compute" if comp_us > mem_us else "bandwidth"
+    elif m > 64:
+        return None
+    else:
+        floor, what = mem_us, "bandwidth"
+    lost = (t - floor) * len(rs) / steps / 1e3
+    if floor >= 0.8 * t or lost < 0.5:
+        return None
+    return lost, (f"`{name}` runs at {floor / t * 100:.0f}% of its {what} floor, {lost:.2f} ms per step "
+                  "short of it (Weight-streaming launches by weight)")
+
+
 def weight_key(r):
     """Group a weight-streaming launch by its main weight: folded name + shape + dtype."""
     w = r["weights"][0]
@@ -299,10 +321,15 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
     total_bytes = sum(r["weight_bytes"] for r in rows)
     lines = []
     emit = lines.append
+    findings = []  # (ms per step, text): the largest costs found below, listed first
 
     emit(f"# Ledger report: `{os.path.basename(os.path.abspath(capture))}`\n")
     emit(f"{len(rows)} kernel launches over {steps} steps, {n_regions} memory regions, "
          f"{unresolved} launches without parameters. Bandwidth ceiling {ceiling:.0f} GB/s.\n")
+    findings_at = len(lines)
+    idle = (span - busy) / steps / 1e6
+    if idle >= 1 or idle * 1e6 * steps >= 0.02 * span:
+        findings.append((idle, f"the GPU idles {idle:.2f} ms per step between kernels (Step)"))
     emit("## Step\n")
     emit("| | per step |\n|---|---|")
     emit(f"| wall time (first launch to last) | {span / steps / 1e6:.2f} ms |")
@@ -327,11 +354,19 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
         b = statistics.mean(r["weight_bytes"] for r in rs)
         lost = sum(r["us"] - r["weight_bytes"] / ceiling / 1e3 for r in rs) / steps / 1e3
         lost_rows.append((lost, key, rs, t, b))
+    unjudged = 0
     for lost, key, rs, t, b in sorted(lost_rows, key=lambda x: -x[0]):
         gbps = b / t / 1e3
+        finding = weight_finding(key[0], rs, t, b, steps, ceiling, peaks, run)
+        if finding:
+            findings.append(finding)
+        unjudged += finding is None and gemm_flops(rs[0], run)[1] > 64 and not peaks
         emit(f"| `{key[0]}` | {list(key[1])} | {key[2]} | {len(rs) / steps:.1f} | {t:.1f} | {b / 1e6:.1f} | "
              f"{gbps:.0f} | {gbps / ceiling * 100:.0f}% | {lost:.2f} |")
     emit("")
+    if unjudged:
+        findings.append((0, f"{unjudged} weight groups multiply more than 64 rows; pass --peak-tflops to judge "
+                            "them against the compute ceiling as well (Compute)"))
 
     # Same kernel, same shape, different speed.
     emit("## Same kernel, same shape, different speed\n")
@@ -368,6 +403,10 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
                 if top:
                     emit(f"- last kernel touching caches before `{label}`: `{top[0][0]}` "
                          f"({top[0][1]}/{len(grp)} launches)")
+                if label == g:
+                    after = f", after `{top[0][0]}`" if top else ""
+                    findings.append((extra, f"`{g}` takes {t - stats[fast]:.1f} us longer per launch than `{fast}` "
+                                            f"on the same kernel and shape{after} (Same kernel, same shape)"))
             emit("")
     if not found:
         emit("None above 15%.\n")
@@ -391,7 +430,11 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
     if folded:
         emit("| weight | tensors | MB each | reads/step | extra GB/step |\n|---|---|---|---|---|")
         for (n, sz), (cnt, _, per) in sorted(folded.items(), key=lambda kv: -kv[1][0] * kv[0][1] * (kv[1][2] - 1)):
-            emit(f"| `{n}` | {cnt} | {sz / 1e6:.1f} | {per:.1f} | {cnt * (per - 1) * sz / 1e9:.2f} |")
+            extra_bytes = cnt * (per - 1) * sz
+            emit(f"| `{n}` | {cnt} | {sz / 1e6:.1f} | {per:.1f} | {extra_bytes / 1e9:.2f} |")
+            if extra_bytes / ceiling / 1e6 >= 0.5:
+                findings.append((extra_bytes / ceiling / 1e6, f"`{n}` is read {per:.1f} times per step; the extra "
+                                 f"{extra_bytes / 1e9:.2f} GB cost at least that long at the ceiling (Weights read more than once)"))
     else:
         emit("None.")
     emit("")
@@ -401,9 +444,28 @@ def report(capture, ceiling, steps, out, peaks=None, sms=None):
              + ", ".join(f"`{n}` ×{c / steps:.1f}/step" for n, c in gathered.most_common(5)) + "\n")
 
     if sms:
-        underfilled(rows, steps, sms, pretty, emit)
+        for alone_ms, name, grid, gbps in underfilled(rows, steps, sms, pretty, emit):
+            # A launch streaming near the ceiling loses little to idle SMs; otherwise count their share.
+            idle_ms = alone_ms * (1 - math.prod(grid) / sms)
+            if idle_ms >= 0.5 and (gbps is None or gbps < 0.8 * ceiling):
+                findings.append((idle_ms, f"`{short(pretty[name], 50)}` runs on {math.prod(grid)} blocks for {sms} SMs "
+                                          f"for {alone_ms:.2f} ms per step; the idle SMs' share is {idle_ms:.2f} ms "
+                                          "(Launches with fewer blocks than SMs)"))
     if peaks:
         compute(rows, steps, ceiling, peaks, run, emit)
+
+    notes = [text for ms, text in findings if ms == 0]
+    top = sorted((f for f in findings if f[0] > 0), key=lambda x: -x[0])[:5]
+    summary = ["## Findings\n"]
+    if top:
+        summary += [f"- **{ms:.2f} ms per step**: {text}" for ms, text in top]
+        summary += [f"- {text}" for text in notes]
+        summary.append("\nEach is the time the item costs against its reference, an upper bound on what fixing it "
+                       "saves; the section named in parentheses has the details.\n")
+    else:
+        summary.append("Nothing above 0.5 ms per step.\n")
+    lines[findings_at:findings_at] = summary
+
 
     text = "\n".join(lines)
     if out:
@@ -442,7 +504,7 @@ def underfilled(rows, steps, sms, pretty, emit):
     emit(f"## Launches with fewer blocks than SMs ({sms})\n")
     if not found:
         emit("None above 0.05 ms per step of time alone.\n")
-        return
+        return []
     emit(f"{sum(f[0] for f in found):.2f} ms per step in launches that cannot use every SM and run alone.\n")
     emit("| kernel | grid | blocks | launches/step | median us | ms/step | alone ms/step | streams | GB/s |")
     emit("|---|---|---|---|---|---|---|---|---|")
@@ -456,6 +518,12 @@ def underfilled(rows, steps, sms, pretty, emit):
              f"{statistics.median(r['us'] for r in rs):.1f} | {ms:.2f} | {sum(r['alone'] for r in rs) / steps / 1e3:.2f} | "
              f"{streams} | {gbps} |")
     emit("")
+    out = []
+    for ms, (name, grid), rs in found:
+        nbytes, us = sum(r["weight_bytes"] for r in rs), sum(r["us"] for r in rs)
+        out.append((ms, name, grid, nbytes / us / 1e3 if nbytes >= len(rs) << 20 else None))
+    return out
+
 
 
 def compute(rows, steps, ceiling, peaks, run, emit):
