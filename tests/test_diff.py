@@ -1,5 +1,8 @@
 """Tests for ledger.diff comparing two captures and self-comparison."""
 
+import json
+import shutil
+
 from ledger import diff
 from report import section, table_rows
 
@@ -39,3 +42,26 @@ def test_diff_self_reports_nothing(captures, tmp_path):
     assert section(text, "Changed beyond drift").strip() == "Nothing."
     assert "## In A only" not in text
     assert "## In B only" not in text
+
+
+def test_diff_works_without_steps_in_run_json(captures, tmp_path):
+    """diff succeeds when run.json omits 'steps' by counting step markers via window_steps."""
+    dst = tmp_path / "decode-no-steps"
+    shutil.copytree(captures / "decode-q38", dst)
+    run_path = dst / "run.json"
+    run = json.loads(run_path.read_text())
+    run.pop("steps", None)
+    run_path.write_text(json.dumps(run))
+
+    out = tmp_path / "diff-no-steps.md"
+    diff.report(
+        str(dst),
+        str(captures / "decode-q38-bf16state"),
+        ceiling=252,
+        min_ms=0.05,
+        tolerance=0.03,
+        out=str(out),
+    )
+    changed = table_rows(section(out.read_text(), "Changed beyond drift"))
+    assert any("gdn_decode_post_conv_mtp" in r[0] for r in changed)
+    assert any("linear_attn.out_proj.weight" in r[2] for r in changed)
