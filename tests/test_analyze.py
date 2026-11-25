@@ -193,3 +193,41 @@ def test_window_steps_falls_back_to_markers_and_errors_without_both(captures, tm
     with pytest.raises(SystemExit) as exc:
         analyze.window_steps(str(no_markers))
     assert "--steps" in str(exc.value)
+
+
+def test_analyze_drops_untimed_kernels_and_markers(captures, tmp_path, capsys):
+    """Kernels with zero timestamps (still running when the window closed) are dropped on load with
+    a stderr notice, do not skew wall time, and do not count as step markers."""
+    base_out = tmp_path / "base.md"
+    analyze.report(str(captures / "decode-q38"), ceiling=252, steps=3, out=str(base_out))
+    base_wall = dict(table_rows(section(base_out.read_text(), "Step")))["wall time (first launch to last)"]
+
+    dst = tmp_path / "decode-untimed"
+    shutil.copytree(captures / "decode-q38", dst)
+    run_path = dst / "run.json"
+    run = json.loads(run_path.read_text())
+    run.pop("steps", None)
+    run_path.write_text(json.dumps(run))
+
+    kernels_path = next(dst.glob("kernels-*.jsonl"))
+    untimed = [
+        {"start": 0, "end": 0, "name": "spin_kernel", "grid": [1, 1, 1], "node": 0, "corr": 999901},
+        {"start": 0, "end": 0, "name": "in_flight_gemm_1", "grid": [1, 1, 1], "node": 0, "corr": 999902},
+        {"start": 0, "end": 0, "name": "in_flight_gemm_2", "grid": [1, 1, 1], "node": 0, "corr": 999903},
+    ]
+    with kernels_path.open("a") as f:
+        for rec in untimed:
+            f.write(json.dumps(rec) + "\n")
+
+    steps = analyze.window_steps(str(dst))
+    assert steps == 3
+
+    capsys.readouterr()
+    out = tmp_path / "untimed.md"
+    analyze.report(str(dst), ceiling=252, steps=steps, out=str(out))
+    err = capsys.readouterr().err
+    text = out.read_text()
+
+    assert "over 3 steps," in text
+    assert dict(table_rows(section(text, "Step")))["wall time (first launch to last)"] == base_wall
+    assert re.search(r"dropped 3 of \d+ kernel records without timestamps", err)
