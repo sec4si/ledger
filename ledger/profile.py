@@ -8,6 +8,7 @@ from hashlib import sha256
 from io import StringIO
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -19,8 +20,70 @@ ACCESS_SOURCES = ("Makefile", "tracer.cpp", "access.h", "patches.cu")
 BUILD_VARIABLES = ("CXX", "CUPTI_INC", "CUPTI_LIB", "SANITIZER", "LIBRARY_PATH")
 
 
+def _find_first(env_name, candidates, filename_glob):
+    """Return the first existing directory matching `filename_glob`, honoring an env override."""
+    override = os.getenv(env_name)
+    dirs = [Path(override).expanduser()] if override else list(candidates)
+    for directory in dirs:
+        if directory.is_dir() and any(directory.glob(filename_glob)):
+            return directory
+    return None
+
+
+def _check_build_prereqs(group, cuda_root):
+    """Fail early with an actionable message if make, C++ compiler, CUPTI, or Sanitizer is missing."""
+    if not shutil.which("make"):
+        raise SystemExit("ledger: cannot find 'make' on PATH. Install GNU make to build Ledger.")
+    cxx = os.getenv("CXX") or "c++"
+    if not shutil.which(cxx):
+        raise SystemExit(f"ledger: cannot find C++ compiler '{cxx}'. Install g++ or set CXX=<compiler>.")
+
+    if group == "capture":
+        inc_candidates = [cuda_root / "extras/CUPTI/include", *sorted(cuda_root.glob("targets/*/include"))]
+        if not _find_first("CUPTI_INC", inc_candidates, "cupti.h"):
+            raise SystemExit(
+                f"ledger: cannot find CUPTI headers (cupti.h) under {cuda_root}. "
+                "Install the CUDA CUPTI development package or set CUPTI_INC=<dir>."
+            )
+        lib_candidates = [cuda_root / "extras/CUPTI/lib64", *sorted(cuda_root.glob("targets/*/lib"))]
+        if not _find_first("CUPTI_LIB", lib_candidates, "libcupti.so*"):
+            raise SystemExit(
+                f"ledger: cannot find CUPTI libraries (libcupti.so) under {cuda_root}. "
+                "Install the CUDA CUPTI package or set CUPTI_LIB=<dir>."
+            )
+    elif group == "access":
+        san = Path(os.getenv("SANITIZER") or (cuda_root / "compute-sanitizer")).expanduser()
+        if not (san / "include/sanitizer.h").is_file() or not any(san.glob("libsanitizer-public.so*")):
+            raise SystemExit(
+                f"ledger: cannot find Compute Sanitizer headers/libraries under {san}. "
+                "Install CUDA Compute Sanitizer or set SANITIZER=<dir>."
+            )
+
+
+def _format_build_failure(group, cuda_root, result):
+    """Turn a failed make invocation into a concise diagnostic instead of raw compiler spam."""
+    combined = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+    hints = [
+        ("cupti.h", "missing CUPTI headers; set CUPTI_INC=<dir> or CUDA_HOME=<cuda>"),
+        ("-lcupti", "missing libcupti; set CUPTI_LIB=<dir> or CUDA_HOME=<cuda>"),
+        ("-lcuda", "missing CUDA driver library (libcuda); check LIBRARY_PATH or driver stubs"),
+        ("sanitizer.h", "missing Compute Sanitizer headers; set SANITIZER=<dir>"),
+        ("-lsanitizer-public", "missing Compute Sanitizer library; set SANITIZER=<dir>"),
+    ]
+    hint = next((msg for needle, msg in hints if needle in combined), None)
+    tail = "\n".join(line for line in combined.splitlines()[-6:] if line.strip())
+    summary = f"ledger: failed to build {group} library (CUDA={cuda_root})"
+    if hint:
+        summary += f": {hint}."
+    else:
+        summary += f" (make exited with status {result.returncode})."
+    return f"{summary}\n{tail}" if tail else summary
+
+
 def build_library(group, sources, targets, compiler, *flags):
     """Build once for these sources and CUDA toolkit, publishing only complete targets."""
+    cuda_root = compiler.parents[1]
+    _check_build_prereqs(group, cuda_root)
     source = ceilings.source_dir(group)
     inputs = [(name, (source / name).read_bytes()) for name in sources]
     config = (str(compiler), compiler.stat().st_mtime_ns, flags, [os.getenv(name) for name in BUILD_VARIABLES])
@@ -40,7 +103,13 @@ def build_library(group, sources, targets, compiler, *flags):
                 path.unlink(missing_ok=True)
             for name, content in inputs:
                 (directory / name).write_bytes(content)
-            subprocess.run(["make", "-C", directory, f"CUDA={compiler.parents[1]}", *flags, *targets], check=True)
+            result = subprocess.run(
+                ["make", "-C", directory, f"CUDA={cuda_root}", *flags, *targets],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode:
+                raise SystemExit(_format_build_failure(group, cuda_root, result))
             if not all(path.is_file() for path in outputs):
                 raise SystemExit(f"ledger: make did not produce {', '.join(targets)} in {directory}.")
             stamp.touch()

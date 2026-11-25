@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,29 @@ name = "ledger"
 version = "0.1.0"
 description = "Per-launch accounting for LLM inference on GPUs"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "ZacharyZcR"}]
 requires-python = ">=3.9"
+keywords = ["cuda", "gpu", "llm", "profiling", "vllm", "cupti", "perfetto"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Profiling",
+    "Topic :: System :: Hardware",
+]
+
+[project.urls]
+Homepage = "https://github.com/sec4si/ledger"
+Repository = "https://github.com/sec4si/ledger"
+Issues = "https://github.com/sec4si/ledger/issues"
 
 [project.optional-dependencies]
 dataflow = ["numpy"]
@@ -34,6 +56,7 @@ packages = ["ledger", "ledger._capture", "ledger._access", "ledger._bench", "led
 "ledger._capture" = ["Makefile", "ledger_cupti.cc"]
 "ledger._access" = ["Makefile", "tracer.cpp", "access.h", "patches.cu"]
 "ledger._bench" = ["bwtest.cu", "flops.py"]
+"ledger._examples" = ["vllm_decode.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
