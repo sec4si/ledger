@@ -193,3 +193,6 @@ ledger analyze out --ceiling-gbps 1350 --peak-tflops bf16=320,int8=640 --out out
 ledger transfers out --steps 1 --out out/transfers.md
 ledger perfetto out --ceiling-gbps 1350 --out out/trace.json
 ```
+
+msprof does not record the size or direction of `MEMCPY_ASYNC` tasks: `ledger transfers` reports
+their times, but the copies are imported with 0 bytes and labelled DtoD.

@@ -142,8 +142,6 @@ def main():
             return handlers[selected](rest)
         if selected in REPORT_OPTIONS:
             rest = report_args(selected, rest)
-        if selected == "ascend-import":
-            return call_main("ascend", selected, rest)
         return call_main(selected.replace("-", "_"), selected, rest)
     except subprocess.CalledProcessError as error:
         raise SystemExit(f"ledger: {error}") from error
