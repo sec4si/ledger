@@ -74,6 +74,7 @@ See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough (including
 | `ledger sass` | Look up the SASS instruction behind a dead store from a cubin directory, function, and PC offset. |
 | `ledger perturb-plan` / `perturb-report` | Generate and summarize replay memory-poisoning experiments (e.g. Sibyl `replay_perturb`). |
 | `ledger sibyl-regions` | Convert a Sibyl recording's address ranges into Ledger's `regions-*.json` memory map. |
+| `ledger ascend-import` | Convert Huawei Ascend CANN `msprof` + `aclGraph` dumps and weight/KV maps into a Ledger capture. |
 
 ## Documentation
 
