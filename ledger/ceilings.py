@@ -63,7 +63,7 @@ def valid_ceiling(data, device):
         positive(data.get("ceiling_gbps"))
         and isinstance(peaks, dict)
         and bool(peaks)
-        and all(key in {"bf16", "fp8", "fp4"} and positive(value) for key, value in peaks.items())
+        and all(key in {"bf16", "fp8", "fp4", "int8", "int4"} and positive(value) for key, value in peaks.items())
     )
 
 

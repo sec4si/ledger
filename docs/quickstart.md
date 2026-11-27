@@ -174,3 +174,22 @@ For a [Sibyl](https://github.com/GeetoRinku/sibyl) replay, which preserves recor
 ledger sibyl-regions <recording>/ranges-rank0-<pid>.json out
 LD_PRELOAD=$(ledger build) LEDGER_OUT=out LEDGER_GRAPH_WINDOW=8:44 <replay program> ...
 ```
+
+---
+
+## Huawei Ascend CANN (`msprof` + `aclGraph`)
+
+To analyze an Ascend NPU run exported with `msprof --export=on`, import its `op_summary_*.csv`
+(and optional `task_time_*.csv`), `aclmdlRIDebugPrint` graph dumps (`--graph`), and weight / KV
+descriptor maps (`--weights`, `--draft-weights`, `--owners`, or `--regions`):
+
+```sh
+ledger ascend-import <msprof PROF_* dir> out \
+  --graph capture.json --graph draft-graph.json \
+  --weights target_weights.json --draft-weights draft_weights.json --owners owners.json \
+  --device "Ascend 910B1" --sms 24 --steps 1 --batch 8 --draft-tokens 7
+
+ledger analyze out --ceiling-gbps 1350 --peak-tflops bf16=320,int8=640 --out out/report.md
+ledger transfers out --steps 1 --out out/transfers.md
+ledger perfetto out --ceiling-gbps 1350 --out out/trace.json
+```

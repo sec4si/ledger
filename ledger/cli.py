@@ -23,6 +23,7 @@ COMMANDS = {
     "perturb-plan": "Generate replay perturbation experiments",
     "perturb-report": "Report results of perturbation experiments",
     "sibyl-regions": "Convert a Sibyl recording's memory map",
+    "ascend-import": "Convert Ascend CANN msprof + aclGraph traces into a Ledger capture",
     "build": "Build the CUDA capture libraries",
     "ceilings": "Measure and cache a GPU's bandwidth and compute ceilings",
     "profile": "Capture a vLLM run and write its report and timeline",
@@ -141,6 +142,8 @@ def main():
             return handlers[selected](rest)
         if selected in REPORT_OPTIONS:
             rest = report_args(selected, rest)
+        if selected == "ascend-import":
+            return call_main("ascend", selected, rest)
         return call_main(selected.replace("-", "_"), selected, rest)
     except subprocess.CalledProcessError as error:
         raise SystemExit(f"ledger: {error}") from error

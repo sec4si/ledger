@@ -224,7 +224,7 @@ def busy_and_gaps(rows):
 
 
 MARKER = "spin_kernel"  # torch.cuda._sleep, launched by examples/vllm_decode.py at the start of each step
-DRAFT = ("speculator.", "drafter.", "spec_decode_model.")
+DRAFT = ("speculator.", "drafter.", "spec_decode_model.", "draft.")
 
 
 def split_steps(rows):
@@ -252,6 +252,10 @@ def precision(dtype):
         return "bf16", 1
     if dtype == "uint8":
         return "fp4", 2
+    if dtype == "int8":
+        return "int8", 1
+    if dtype == "int4":
+        return "int4", 2
     return dtype, 1
 
 
@@ -275,7 +279,7 @@ def gemm_flops(r, run):
     return cls, m, 2 * m * elements
 
 
-ACT_BYTES = {"fp8": 1, "bf16": 2, "fp4": 0.5}  # input activation element, by the weight's compute class
+ACT_BYTES = {"fp8": 1, "bf16": 2, "fp4": 0.5, "int8": 1, "int4": 1}  # input activation element, by the weight's compute class
 
 
 def act_bytes(r, run):
