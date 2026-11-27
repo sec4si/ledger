@@ -1,6 +1,6 @@
 """Import Huawei Ascend CANN msprof + aclGraph traces into a Ledger capture directory.
 
-    python -m ledger.ascend <msprof dir or op_summary.csv> <out capture dir> \\
+    python -m ledger.ascend_import <msprof dir or op_summary.csv> <out capture dir> \\
         [--graph capture.json ...] [--weights target_weights.json ...] \\
         [--draft-weights draft_weights.json ...] [--owners owners.json ...] \\
         [--regions regions.json ...] [--stream-map 23:18 ...] \\
@@ -13,6 +13,10 @@ recover the exact 64-bit device pointer arguments (`Kernel Args`) for every AI C
 HCCL AIV task. Combining that with named weight and KV-cache maps (such as Sibyl's `kv-census`
 descriptors or existing Ledger `regions-*.json`) lets `ledger analyze`, `ledger transfers`,
 `ledger diff`, and `ledger perfetto` account for Ascend runs identically to CUDA captures.
+
+msprof records when a `MEMCPY_ASYNC` task ran but not how many bytes it moved or in which
+direction, so the imported copies carry 0 bytes and are all labelled device-to-device: their
+times in `ledger transfers` are measured, their MB and GB/s columns are not.
 """
 
 import argparse
@@ -21,6 +25,8 @@ import glob
 import json
 import os
 import struct
+import sys
+from decimal import Decimal, InvalidOperation
 
 from ledger import analyze as A
 from ledger import sibyl_regions
@@ -51,8 +57,8 @@ def _parse_us_ns(text):
     if not text or text == "N/A":
         return None
     try:
-        return round(float(text) * 1000.0)
-    except ValueError:
+        return round(Decimal(text) * 1000)  # epoch microseconds do not fit a float to the nanosecond
+    except InvalidOperation:
         return None
 
 
@@ -83,6 +89,7 @@ def parse_kernel_args(text):
 def load_acl_graphs(paths, stream_map=None):
     """Load aclmdlRIDebugPrint JSON dumps into a `(stream_id, task_id) -> node` lookup."""
     by_st = {}
+    clashes = 0
     for path in paths:
         events = json.load(open(path))
         for ev in events:
@@ -99,11 +106,17 @@ def load_acl_graphs(paths, stream_map=None):
                 continue
             stream_id = int(args["Stream Id"])
             task_id = int(args["Task Id"])
-            by_st[(stream_id, task_id)] = {
+            node = {
                 "name": ev.get("name", ""),
                 "blocks": int(args.get("Numblocks") or 1),
                 "params": params,
             }
+            clashes += by_st.setdefault((stream_id, task_id), node)["params"] != params
+            by_st[(stream_id, task_id)] = node
+    if clashes:
+        print(f"ledger ascend-import: {clashes} (stream, task) pairs appear in the graph dumps with different "
+              "kernel args; the last one wins, so some launches may resolve to the wrong pointers",
+              file=sys.stderr)
     if stream_map:
         for runtime_stream, graph_stream in stream_map.items():
             for (gs, tid), node in list(by_st.items()):
@@ -396,8 +409,11 @@ def _parse_stream_maps(specs):
             pair = pair.strip()
             if not pair:
                 continue
-            src, dst = pair.split(":", 1)
-            mapping[int(src)] = int(dst)
+            try:
+                src, dst = pair.split(":")
+                mapping[int(src)] = int(dst)
+            except ValueError:
+                raise SystemExit(f"ledger ascend-import: --stream-map expects RUNTIME:GRAPH stream ids, got {pair!r}") from None
     return mapping
 
 

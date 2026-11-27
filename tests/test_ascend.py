@@ -1,11 +1,11 @@
-"""Tests for ledger.ascend: Ascend CANN msprof + aclGraph import and end-to-end Ledger analysis."""
+"""Tests for ledger.ascend_import: Ascend CANN msprof + aclGraph import and end-to-end Ledger analysis."""
 
 import json
 import sys
 
 import pytest
 
-from ledger import analyze, ascend, cli, perfetto, transfers
+from ledger import analyze, ascend_import as ascend, cli, perfetto, transfers
 from report import section, table_rows
 
 
@@ -189,3 +189,22 @@ def test_parse_kernel_args_ignores_non_hex_tokens():
 def test_import_capture_missing_op_summary_exits(tmp_path):
     with pytest.raises(SystemExit, match="op_summary"):
         ascend.import_capture(str(tmp_path), str(tmp_path / "out"))
+
+
+def test_timestamps_keep_nanoseconds():
+    assert ascend._parse_us_ns("1764251755123456.789\t") == 1764251755123456789
+
+
+def test_clashing_graph_dumps_warn(tmp_path, capsys):
+    paths = []
+    for name, arg in (("a", "0x10"), ("b", "0x20"), ("c", "0x20")):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps([{"name": name, "args": {"Stream Id": 1, "Task Id": 1, "Kernel Args": arg}}]))
+        paths.append(str(path))
+    assert ascend.load_acl_graphs(paths)[(1, 1)]["name"] == "c"
+    assert "1 (stream, task) pairs" in capsys.readouterr().err
+
+
+def test_bad_stream_map_exits():
+    with pytest.raises(SystemExit, match="--stream-map"):
+        ascend._parse_stream_maps(["23"])
